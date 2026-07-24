@@ -5,7 +5,7 @@
 
 mod chat;
 mod console;
-mod network;
+pub mod network;
 mod overview;
 
 use crate::app::{App, Pane};
@@ -44,7 +44,9 @@ pub fn draw(f: &mut Frame, app: &App) -> Layout4 {
     network::draw(f, app, l.network);
     console::draw(f, app, l.console);
     chat::draw(f, app, l.chat);
-    if app.detail_open {
+    if app.domain_picker {
+        network::draw_domain_picker(f, app, f.area());
+    } else if app.detail_open {
         network::draw_detail(f, app, f.area());
     }
     l

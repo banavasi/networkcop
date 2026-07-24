@@ -13,7 +13,7 @@ use crossterm::terminal::{
 };
 use futures_util::StreamExt;
 use networkcop::agent::{self, llm::Backend, Session};
-use networkcop::app::{App, ChatRole, Pane, TAB_ALL};
+use networkcop::app::{App, ChatRole, Kind, Pane};
 use networkcop::cdp::{self, Capture, LaunchOpts};
 use networkcop::db::{self, ConsoleLine, Db, Write as DbWrite};
 use networkcop::tui;
@@ -264,9 +264,39 @@ async fn run(cli: Cli) -> Result<()> {
     execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
     term.show_cursor().ok();
 
-    // snapshot the final DOM before Chrome goes away
-    if let Ok(html) = cdp.dom_snapshot().await {
-        let url = cdp.current_url().await.unwrap_or_else(|_| target.clone());
+    // Snapshot the final DOM before Chrome goes away.
+    //
+    // Two hazards make this more delicate than it looks, and both were observed:
+    // the event loop has stopped draining `captures`, so the CDP reader task will
+    // block on a full channel and never dispatch our reply — a deadlock. And even
+    // with the channel drained, a wedged Chrome can simply never answer. So drain
+    // concurrently AND bound the wait: a missing snapshot is a cosmetic loss, but
+    // failing to reach the flush below would lose the whole session.
+    let snap_cdp = cdp.clone();
+    let snapshot = async {
+        let html = snap_cdp.dom_snapshot().await.ok()?;
+        let url = snap_cdp
+            .current_url()
+            .await
+            .unwrap_or_else(|_| target.clone());
+        Some((url, html))
+    };
+    tokio::pin!(snapshot);
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                done = &mut snapshot => break done,
+                // keep the reader unblocked so it can dispatch our reply
+                maybe = captures.recv() => {
+                    if maybe.is_none() { break None; }
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or(None);
+
+    if let Some((url, html)) = snapshot {
         let _ = writes_tx
             .send(DbWrite::DomSnapshot {
                 ts: Utc::now(),
@@ -436,6 +466,30 @@ async fn on_key(
         return;
     }
 
+    // the domain picker owns the keyboard while open
+    if app.domain_picker {
+        let rows = networkcop::tui::network::domain_rows(app);
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.domain_picker = false,
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.domain_cursor = (app.domain_cursor + 1).min(rows.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.domain_cursor = app.domain_cursor.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                // row 0 is "all domains"
+                let pick = rows
+                    .get(app.domain_cursor)
+                    .and_then(|(label, count, _)| count.map(|_| label.clone()));
+                app.set_domain(pick);
+                app.domain_picker = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // modal owns the keyboard while open
     if app.detail_open {
         match k.code {
@@ -538,10 +592,16 @@ async fn on_key(
         KeyCode::Char(c @ '1'..='5') if app.focus == Pane::Network => {
             app.set_tab(c as usize - '1' as usize);
         }
-        KeyCode::Esc => {
-            app.tab = TAB_ALL;
-            app.selected = 0;
+        // kind filter: t cycles forward, T back
+        KeyCode::Char('t') if app.focus == Pane::Network => app.cycle_kind(true),
+        KeyCode::Char('T') if app.focus == Pane::Network => app.cycle_kind(false),
+        // domain picker
+        KeyCode::Char('d') if app.focus == Pane::Network => {
+            app.domain_picker = true;
+            let rows = networkcop::tui::network::domain_rows(app);
+            app.domain_cursor = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
         }
+        KeyCode::Esc => app.clear_filters(),
         _ => {}
     }
 }
@@ -560,16 +620,29 @@ fn on_mouse(app: &mut App, m: MouseEvent, layout: &tui::Layout4) {
 
             if pane == Pane::Network {
                 let inner_y = layout.network.y + 1; // border
-                // row 0 of the inner area is the tab strip
+                let x0 = layout.network.x + 1;
+                // row 0 is the method strip, row 1 the kind + domain strip
                 if m.row == inner_y {
-                    if let Some(idx) = tab_hit(layout.network.x + 1, m.column) {
+                    if let Some(idx) = tab_hit(x0, m.column) {
                         app.set_tab(idx);
                     }
-                } else if m.row > inner_y {
+                } else if m.row == inner_y + 1 {
+                    match kind_hit(x0, m.column) {
+                        Some(k) => app.set_kind(k),
+                        None => {
+                            if domain_hit(x0, m.column) {
+                                app.domain_picker = true;
+                                let rows = networkcop::tui::network::domain_rows(app);
+                                app.domain_cursor =
+                                    rows.iter().position(|(_, _, a)| *a).unwrap_or(0);
+                            }
+                        }
+                    }
+                } else if m.row > inner_y + 1 {
                     let visible = app.visible();
-                    let cap = layout.network.height.saturating_sub(3) as usize;
+                    let cap = layout.network.height.saturating_sub(4) as usize;
                     let start = app.selected.saturating_sub(cap.saturating_sub(1));
-                    let row = (m.row - inner_y - 1) as usize + start;
+                    let row = (m.row - inner_y - 2) as usize + start;
                     if row < visible.len() {
                         // clicking the selected row opens it
                         if app.selected == row {
@@ -610,6 +683,36 @@ pub fn tab_hit(x0: u16, col: u16) -> Option<usize> {
         cursor += w + 3; // " | "
     }
     None
+}
+
+/// Which kind tab a click landed on. Strip renders `AJAX | REST | DOC | STATIC`
+/// — Kind::All is the cleared state and has no tab of its own.
+pub fn kind_hit(x0: u16, col: u16) -> Option<Kind> {
+    let mut cursor = x0;
+    for k in Kind::ALL.iter().skip(1) {
+        let w = k.label().len() as u16;
+        if col >= cursor && col < cursor + w {
+            return Some(*k);
+        }
+        cursor += w + 3; // " | "
+    }
+    None
+}
+
+/// Start column of the `[d] …` domain selector on the kind strip.
+fn domain_strip_x(x0: u16) -> u16 {
+    let tabs: u16 = Kind::ALL
+        .iter()
+        .skip(1)
+        .map(|k| k.label().len() as u16)
+        .sum::<u16>()
+        + 3 * (Kind::ALL.len() as u16 - 2); // separators
+    x0 + tabs + 3
+}
+
+/// Did a click land on the domain selector?
+pub fn domain_hit(x0: u16, col: u16) -> bool {
+    col >= domain_strip_x(x0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -743,6 +846,62 @@ fn list_sessions(db_path: &std::path::Path, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kind_clicks_map_to_the_rendered_strip() {
+        // "AJAX | REST | DOC | STATIC" starting at column 10
+        assert_eq!(kind_hit(10, 10), Some(Kind::Ajax)); // A
+        assert_eq!(kind_hit(10, 13), Some(Kind::Ajax)); // X
+        assert_eq!(kind_hit(10, 14), None); // separator
+        assert_eq!(kind_hit(10, 17), Some(Kind::Rest));
+        assert_eq!(kind_hit(10, 24), Some(Kind::Doc));
+        assert_eq!(kind_hit(10, 30), Some(Kind::Static));
+        // Kind::All has no tab — it is the cleared state
+        assert!(!kind_hit(10, 12).is_some_and(|k| k == Kind::All));
+    }
+
+    #[test]
+    fn domain_selector_click_zone_starts_after_the_kind_tabs() {
+        // AJAX|REST|DOC|STATIC = 4+4+3+6 = 17 chars + 3 separators (9) = 26, +3 gap
+        let x0 = 10;
+        assert!(!domain_hit(x0, 30), "still inside STATIC");
+        assert!(domain_hit(x0, 39), "past the tabs");
+        // the two zones must not overlap, or a click would do two things
+        for col in x0..x0 + 60 {
+            assert!(
+                !(kind_hit(x0, col).is_some() && domain_hit(x0, col)),
+                "column {col} is claimed by both the kind tabs and the domain selector"
+            );
+        }
+    }
+
+    #[test]
+    fn picker_rows_lead_with_all_and_mark_the_active_domain() {
+        use networkcop::db::Exchange;
+        let mut app = App::new("t".into());
+        app.exchanges = vec![
+            Exchange {
+                method: "GET".into(),
+                url: "http://localhost:8080/a".into(),
+                ..Default::default()
+            },
+            Exchange {
+                method: "GET".into(),
+                url: "https://cdn.co/b".into(),
+                ..Default::default()
+            },
+        ];
+        let rows = networkcop::tui::network::domain_rows(&app);
+        assert_eq!(rows[0].0, "all domains");
+        assert_eq!(rows[0].1, None, "the all row carries no count");
+        assert!(rows[0].2, "active when no domain filter is set");
+        assert_eq!(rows.len(), 3);
+
+        app.set_domain(Some("cdn.co".into()));
+        let rows = networkcop::tui::network::domain_rows(&app);
+        assert!(!rows[0].2);
+        assert!(rows.iter().any(|(l, c, a)| l == "cdn.co" && *c == Some(1) && *a));
+    }
 
     #[test]
     fn tab_clicks_map_to_the_rendered_strip() {

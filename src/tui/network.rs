@@ -4,15 +4,17 @@
 //! shows the complete request and response headers and bodies — and nothing else.
 
 use super::{centered, method_color, pane_block, status_style};
-use crate::app::{human_size, App, Pane, METHOD_TABS, TAB_ALL};
+use crate::app::{human_size, App, Kind, Pane, METHOD_TABS};
 use crate::db::Exchange;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-/// Row offset of the tab strip inside the pane's inner area.
-const TAB_ROW: u16 = 0;
+/// Row offset of the method tab strip inside the pane's inner area.
+pub const TAB_ROW: u16 = 0;
+/// Row offset of the kind + domain strip.
+pub const KIND_ROW: u16 = 1;
 /// First row of the list inside the inner area.
-const LIST_TOP: u16 = 1;
+pub const LIST_TOP: u16 = 2;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let visible = app.visible();
@@ -48,7 +50,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             },
         ));
     }
-    if app.tab != TAB_ALL {
+    if app.filters_active() {
         tabs.push(Span::styled(
             "   [esc] clear",
             Style::default().fg(Color::DarkGray),
@@ -58,6 +60,46 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(tabs)),
         Rect {
             y: inner.y + TAB_ROW,
+            height: 1,
+            ..inner
+        },
+    );
+
+    // --- kind strip + domain selector ---
+    let mut kinds: Vec<Span> = Vec::new();
+    for (i, k) in Kind::ALL.iter().enumerate().skip(1) {
+        if i > 1 {
+            kinds.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+        let on = app.kind == *k;
+        kinds.push(Span::styled(
+            k.label().to_string(),
+            if on {
+                Style::default().fg(Color::Magenta).bold().underlined()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+    }
+    kinds.push(Span::styled("   ", Style::default()));
+    kinds.push(Span::styled(
+        "[d] ".to_string(),
+        Style::default().fg(Color::DarkGray),
+    ));
+    match &app.domain {
+        Some(d) => kinds.push(Span::styled(
+            elide(d, 24),
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        None => kinds.push(Span::styled(
+            format!("all domains ({})", app.domains().len()),
+            Style::default().fg(Color::DarkGray),
+        )),
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(kinds)),
+        Rect {
+            y: inner.y + KIND_ROW,
             height: 1,
             ..inner
         },
@@ -113,9 +155,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             if app.exchanges.is_empty() {
-                "  waiting for traffic…"
+                "  waiting for traffic…".to_string()
             } else {
-                "  no requests match this filter"
+                format!("  nothing matches {}", app.filter_label())
             },
             Style::default().fg(Color::DarkGray).italic(),
         )));
@@ -153,6 +195,77 @@ fn elide(s: &str, w: usize) -> String {
     }
     let keep: String = s.chars().skip(n - (w - 1)).collect();
     format!("…{keep}")
+}
+
+/// Domain picker. Lists every host seen this session, busiest first, so the
+/// third-party noise can be filtered away in one keystroke.
+pub fn draw_domain_picker(f: &mut Frame, app: &App, area: Rect) {
+    let modal = centered(area, 60, 60);
+    f.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Line::from(" Filter by domain ").style(Style::default().fg(Color::Cyan).bold()))
+        .title_bottom(
+            Line::from(" ↑↓ move · enter select · esc cancel ")
+                .style(Style::default().fg(Color::DarkGray)),
+        );
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    if inner.height == 0 {
+        return;
+    }
+
+    let rows = domain_rows(app);
+    let cap = inner.height as usize;
+    let start = app.domain_cursor.saturating_sub(cap.saturating_sub(1));
+    let width = inner.width as usize;
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(cap)
+        .map(|(i, (label, count, active))| {
+            let sel = i == app.domain_cursor;
+            let count_txt = count.map(|n| n.to_string()).unwrap_or_default();
+            let name_w = width.saturating_sub(count_txt.len() + 4);
+            Line::from(vec![
+                Span::styled(
+                    if sel { "▍" } else { " " },
+                    Style::default().fg(if sel { Color::Cyan } else { Color::Reset }),
+                ),
+                Span::styled(
+                    if *active { "● " } else { "  " },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:<w$}", elide(label, name_w), w = name_w),
+                    if sel {
+                        Style::default().fg(Color::White).bold()
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ),
+                Span::styled(count_txt, Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Picker rows: "all domains" first, then each host. `None` count = the all row.
+/// Shared with the key handler so the cursor and the display cannot disagree.
+pub fn domain_rows(app: &App) -> Vec<(String, Option<usize>, bool)> {
+    let mut rows: Vec<(String, Option<usize>, bool)> =
+        vec![("all domains".into(), None, app.domain.is_none())];
+    for (host, n) in app.domains() {
+        let active = app.domain.as_deref() == Some(host.as_str());
+        rows.push((host, Some(n), active));
+    }
+    rows
 }
 
 /// The complete exchange. Nothing but headers and bodies, per spec.

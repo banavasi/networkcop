@@ -171,6 +171,70 @@ impl Exchange {
             _ => "OTHER",
         }
     }
+
+    fn resource_is(&self, want: &[&str]) -> bool {
+        self.resource_type
+            .as_deref()
+            .map(|t| want.iter().any(|w| t.eq_ignore_ascii_case(w)))
+            .unwrap_or(false)
+    }
+
+    fn mime(&self) -> &str {
+        self.mime_type.as_deref().unwrap_or("")
+    }
+
+    /// Issued by page script at runtime — `fetch()` or `XMLHttpRequest`.
+    ///
+    /// This answers "what did the JavaScript actually ask for", which includes
+    /// analytics beacons and telemetry that are not REST at all.
+    pub fn is_ajax(&self) -> bool {
+        self.resource_is(&["XHR", "Fetch"])
+    }
+
+    /// Looks like an API endpoint.
+    ///
+    /// Deliberately distinct from [`is_ajax`]: this answers "which endpoints were
+    /// hit", and catches API calls made outside XHR (a service worker, a redirect,
+    /// a document-level JSON GET) while excluding an XHR that fetched a template.
+    /// The two overlap heavily but neither contains the other.
+    pub fn is_rest(&self) -> bool {
+        if self.is_static() || self.is_document() {
+            return false;
+        }
+        let path = self.path();
+        let looks_like_api = path.contains("/api/")
+            || path.starts_with("/api")
+            || path.contains("/graphql")
+            || path.contains("/rest/")
+            // /v1/… /v2/… version-prefixed endpoints
+            || path.split('/').any(|seg| {
+                let mut c = seg.chars();
+                c.next() == Some('v')
+                    && c.clone().next().is_some_and(|d| d.is_ascii_digit())
+                    && c.all(|d| d.is_ascii_digit())
+            });
+        let json_shaped = self.mime().contains("json");
+        looks_like_api || (json_shaped && self.is_ajax())
+    }
+
+    /// A top-level page load.
+    pub fn is_document(&self) -> bool {
+        self.resource_is(&["Document"]) || self.mime().starts_with("text/html")
+    }
+
+    /// Scripts, styles, images, fonts, media — the bulk of a dev-server page load.
+    pub fn is_static(&self) -> bool {
+        if self.resource_is(&["Script", "Stylesheet", "Image", "Font", "Media"]) {
+            return true;
+        }
+        let m = self.mime();
+        m.starts_with("image/")
+            || m.starts_with("font/")
+            || m.starts_with("video/")
+            || m.starts_with("audio/")
+            || m.contains("javascript")
+            || m.contains("css")
+    }
 }
 
 #[derive(Debug, Clone)]

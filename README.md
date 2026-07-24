@@ -61,9 +61,39 @@ networkcop --ask "/review"        # one-shot, against the last session
 | `↑` `↓` / `j` `k` | move within a pane |
 | `enter` | open the selected request |
 | `←` `→` / `1`–`5` | switch method tab (or click it) |
-| `esc` | clear the filter, or close the modal |
+| `t` / `T` | cycle the kind filter — AJAX, REST, DOC, STATIC |
+| `d` | pick a domain (or click the selector) |
+| `esc` | clear all filters, or close a modal |
 | `i` | jump to the agent input |
 | `q` / `ctrl-c` | quit — always flushes to disk |
+
+### Filtering
+
+Three independent axes that AND together — **method**, **kind**, and **domain**.
+They exist because a real page load is mostly noise: one run against a Vite app
+captured 561 requests, of which 552 were static modules and 6 were the calls anyone
+actually cares about.
+
+```
+GET | POST | PATCH | DELETE | OTHER
+AJAX | REST | DOC | STATIC     [d] all domains (12)
+```
+
+**AJAX and REST are different questions**, which is why both exist:
+
+- **AJAX** — what the page's JavaScript requested at runtime (`fetch`/XHR). Includes
+  analytics beacons and telemetry that are not APIs at all.
+- **REST** — what looks like an API endpoint (`/api/…`, `/v1/…`, `/graphql`,
+  JSON-shaped), however it was issued — including calls from a service worker or a
+  redirect that never went through XHR.
+
+They overlap heavily but neither contains the other. In the session above,
+`/g/collect?v=2` was AJAX-but-not-REST, while the app's real
+`/api/ug/useraccounts/featureflags` was both.
+
+The domain picker (`d`) lists every host seen, busiest first, with counts. It is
+often the fastest way to find out that your app's API is not on the host you thought
+it was.
 
 Selecting a request opens the complete exchange: request headers and body, response
 headers and body. Nothing else — no waterfall chrome, no timing breakdown. That is

@@ -19,29 +19,12 @@ const SAMPLE: usize = 1200;
 /// Requests worth reasoning about — the API calls, not the 400 JS modules a dev
 /// server serves. The probe measured 554 requests per page load; without this
 /// filter every prompt would be mostly noise.
+/// Uses the same `is_rest`/`is_ajax`/`is_static` classification the UI filters use
+/// (see `db::Exchange`), so "what the REST tab shows" and "what the agent reasons
+/// about" cannot drift apart.
 pub fn interesting(all: &[Exchange]) -> Vec<&Exchange> {
     all.iter()
-        .filter(|e| {
-            if e.is_error() {
-                return true;
-            }
-            let looks_api = e.path().contains("/api/")
-                || e.path().contains("/graphql")
-                || e.resource_type
-                    .as_deref()
-                    .map(|t| t.eq_ignore_ascii_case("XHR") || t.eq_ignore_ascii_case("Fetch"))
-                    .unwrap_or(false);
-            let is_asset = matches!(
-                e.mime_type.as_deref().unwrap_or(""),
-                m if m.starts_with("image/")
-                  || m.starts_with("font/")
-                  || m.starts_with("video/")
-                  || m.starts_with("audio/")
-                  || m.contains("javascript")
-                  || m.contains("css")
-            );
-            looks_api && !is_asset
-        })
+        .filter(|e| e.is_error() || ((e.is_rest() || e.is_ajax()) && !e.is_static()))
         .collect()
 }
 
