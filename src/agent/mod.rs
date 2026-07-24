@@ -57,15 +57,26 @@ pub struct Session {
     pub exchanges: Vec<Exchange>,
     pub console: Vec<ConsoleLine>,
     pub navigations: Vec<Navigation>,
+    /// Set when these are a filtered slice rather than the whole session, e.g.
+    /// "POST · REST · /checkout". Carried into the digest so the model describes
+    /// what it was actually shown instead of asserting session-wide facts, and
+    /// into command output so an export says what it covers.
+    pub filter: Option<String>,
+    /// How many exchanges exist unfiltered — for honest "8 of 561" reporting.
+    pub total_exchanges: usize,
 }
 
 impl Session {
     pub fn load(db: &Db, session_id: i64, target: &str) -> Result<Self> {
+        let exchanges = db.exchanges(session_id)?;
+        let total_exchanges = exchanges.len();
         Ok(Self {
             target: target.to_string(),
-            exchanges: db.exchanges(session_id)?,
+            exchanges,
             console: db.console(session_id)?,
             navigations: db.navigations(session_id)?,
+            filter: None,
+            total_exchanges,
         })
     }
 
@@ -75,7 +86,22 @@ impl Session {
             &self.exchanges,
             &self.console,
             &self.navigations,
+            self.filter.as_deref(),
+            self.total_exchanges,
         )
+    }
+
+    /// " — 8 of 561 requests matching POST · REST · /checkout", appended to
+    /// command output so an export never silently covers less than assumed.
+    pub fn scope_note(&self) -> String {
+        match &self.filter {
+            Some(f) => format!(
+                " — {} of {} requests matching {f}",
+                self.exchanges.len(),
+                self.total_exchanges
+            ),
+            None => String::new(),
+        }
     }
 
     /// Nothing captured yet — every command should say so rather than
@@ -145,9 +171,10 @@ pub async fn handle(
                 std::fs::write(&path, &doc)?;
                 AgentReply {
                     text: format!(
-                        "Wrote {} — OpenAPI 3.1, {} operations, examples are real captured payloads.",
+                        "Wrote {} — OpenAPI 3.1, {} operations, examples are real captured payloads.{}",
                         path.display(),
-                        tools::interesting(&session.exchanges).len()
+                        tools::interesting(&session.exchanges).len(),
+                        session.scope_note()
                     ),
                     cost_usd: 0.0,
                     wrote: vec![path],
@@ -156,16 +183,24 @@ pub async fn handle(
         }
 
         Intent::SavePage(name) => {
+            // With a page filter active every exchange belongs to that page, so
+            // take the page from the data rather than from "wherever the browser
+            // ended up" — otherwise saving a filtered page names the wrong URL.
             let url = session
-                .navigations
-                .last()
-                .map(|n| n.url.clone())
+                .exchanges
+                .iter()
+                .find_map(|e| e.page_url.clone())
+                .or_else(|| session.navigations.last().map(|n| n.url.clone()))
                 .unwrap_or_else(|| session.target.clone());
             let doc = tools::save_page(&name, &url, &session.exchanges, &session.console)?;
             let path = out_dir.join(format!("{}.yaml", slugify(&name)));
             std::fs::write(&path, &doc)?;
             AgentReply {
-                text: format!("Wrote {} — page {url} and its calls.", path.display()),
+                text: format!(
+                    "Wrote {} — page {url} and its calls.{}",
+                    path.display(),
+                    session.scope_note()
+                ),
                 cost_usd: 0.0,
                 wrote: vec![path],
             }
@@ -202,8 +237,9 @@ pub async fn handle(
                 let (bug, cost) = describe_bug(session, backend, "").await;
                 AgentReply {
                     text: format!(
-                        "{}\n\n{}",
+                        "{}{}\n\n{}",
                         session_summary(session),
+                        session.scope_note(),
                         fix_prompt(&slugify(&bug_title(&bug, "")), &bug)
                     ),
                     cost_usd: cost,
@@ -435,6 +471,8 @@ mod tests {
         e.res_body = Some(br#"{"error":"empty_line_item"}"#.to_vec());
         Session {
             target: "http://localhost:8080".into(),
+            filter: None,
+            total_exchanges: 1,
             exchanges: vec![e],
             console: vec![ConsoleLine {
                 ts: "t".into(),
@@ -442,7 +480,8 @@ mod tests {
                 text: "TypeError: t.total is undefined".into(),
                 url: None,
                 line: None,
-                source: "exception".into(),
+                source: "console".into(),
+                page_url: None,
             }],
             navigations: vec![Navigation {
                 ts: "t".into(),
@@ -468,6 +507,103 @@ mod tests {
         let out = session_summary(&s);
         assert!(out.contains("1 requests, 1 failed, 1 console errors"));
         assert!(out.contains("2100ms"));
+    }
+
+    #[test]
+    fn a_filtered_session_tells_the_model_it_is_a_slice() {
+        let mut s = session_with_failure();
+        s.filter = Some("REST · /checkout".into());
+        s.total_exchanges = 561;
+
+        let d = s.digest();
+        assert!(d.contains("FILTERED"), "must be flagged: {d}");
+        assert!(d.contains("REST · /checkout"), "names the filter");
+        assert!(d.contains("of 561"), "gives the denominator");
+        // and instructs against generalising
+        assert!(d.to_lowercase().contains("filtered view"));
+    }
+
+    #[test]
+    fn an_unfiltered_session_says_nothing_about_filters() {
+        let s = session_with_failure();
+        let d = s.digest();
+        assert!(!d.contains("FILTERED"));
+        assert_eq!(s.scope_note(), "", "no note when nothing is filtered");
+    }
+
+    #[test]
+    fn scope_note_states_coverage_honestly() {
+        let mut s = session_with_failure();
+        s.filter = Some("POST · /checkout".into());
+        s.total_exchanges = 561;
+        let n = s.scope_note();
+        assert!(n.contains("1 of 561"));
+        assert!(n.contains("POST · /checkout"));
+    }
+
+    #[tokio::test]
+    async fn export_covers_only_the_filtered_slice_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("nc-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("s.db");
+        let mut db = Db::open(&db_path, "t").unwrap();
+
+        let mut s = session_with_failure();
+        s.filter = Some("REST · /checkout".into());
+        s.total_exchanges = 561;
+
+        let r = handle(
+            Intent::Export(Some("api.yaml".into())),
+            &s,
+            &Backend::ClaudeCli {
+                model: "haiku".into(),
+            },
+            &mut db,
+            &dir,
+        )
+        .await
+        .unwrap();
+
+        assert!(r.text.contains("1 of 561"), "reports coverage: {}", r.text);
+        let doc = std::fs::read_to_string(dir.join("api.yaml")).unwrap();
+        assert!(doc.contains("/api/cart/checkout"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn save_page_names_the_filtered_page_not_the_last_navigation() {
+        let dir = std::env::temp_dir().join(format!("nc-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = Db::open(&dir.join("s.db"), "t").unwrap();
+
+        let mut s = session_with_failure();
+        // the browser has since moved on, but the filtered data is /checkout
+        s.navigations.push(Navigation {
+            ts: "t".into(),
+            url: "http://localhost:8080/somewhere-else".into(),
+        });
+        s.exchanges[0].page_url = Some("http://localhost:8080/checkout".into());
+        s.filter = Some("/checkout".into());
+
+        let r = handle(
+            Intent::SavePage("cart".into()),
+            &s,
+            &Backend::ClaudeCli {
+                model: "haiku".into(),
+            },
+            &mut db,
+            &dir,
+        )
+        .await
+        .unwrap();
+
+        assert!(r.text.contains("/checkout"), "{}", r.text);
+        assert!(
+            !r.text.contains("somewhere-else"),
+            "must not name where the browser drifted to: {}",
+            r.text
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

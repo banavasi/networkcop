@@ -92,6 +92,7 @@ mod tests {
             url: None,
             line: None,
             source: "console".into(),
+            page_url: None,
         }
     }
 

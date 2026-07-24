@@ -361,6 +361,20 @@ impl App {
             .collect()
     }
 
+    /// Console lines passing the page filter. The other axes are request-shaped
+    /// and do not apply to console output.
+    pub fn visible_console(&self) -> Vec<&ConsoleLine> {
+        self.console
+            .iter()
+            .filter(|c| {
+                self.page
+                    .as_deref()
+                    .map(|p| c.page_path() == p)
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
     /// Hosts seen this session, busiest first. Drives the domain picker.
     ///
     /// Counts are unfiltered on purpose: the picker should show what is available

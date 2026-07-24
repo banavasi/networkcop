@@ -190,6 +190,26 @@ Reproduction steps and expected behaviour:
 [drawn from the session]
 ```
 
+### Commands respect the active filters
+
+Whatever the request list is showing is what the agent works on. Filter to
+`REST · /checkout` and `/export` produces an OpenAPI document for that page's API
+calls, `/save-page` names that page, `/review` analyses those requests, and a
+free-text question is answered from them.
+
+This is deliberately visible rather than silent:
+
+```
+› /export checkout-api.yaml
+Wrote ./checkout-api.yaml — OpenAPI 3.1, 2 operations, examples are real
+captured payloads — 3 of 568 requests matching REST · /checkout
+```
+
+The digest handed to the model also states that it is a filtered view and gives the
+denominator, so it answers about what it was shown instead of asserting session-wide
+facts. Console output is filtered by page alongside the requests. Press `esc` to
+clear the filters when you want the whole session again.
+
 `/report` needs `JIRA_BASE_URL` and `JIRA_API_TOKEN` (plus `JIRA_EMAIL` for Jira
 Cloud basic auth, and `JIRA_PROJECT`, default `BUG`). Without them it skips filing
 and just returns the prompt.

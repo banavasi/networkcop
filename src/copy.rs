@@ -185,7 +185,8 @@ mod tests {
                 text: "TypeError: t.total is undefined".into(),
                 url: Some("http://localhost:8080/app.js".into()),
                 line: Some(42),
-                source: "exception".into(),
+                source: "console".into(),
+                page_url: None,
             },
             ConsoleLine {
                 ts: "t".into(),
@@ -194,6 +195,7 @@ mod tests {
                 url: None,
                 line: None,
                 source: "console".into(),
+                page_url: None,
             },
         ]
     }

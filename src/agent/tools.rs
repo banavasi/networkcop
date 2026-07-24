@@ -34,14 +34,26 @@ pub fn digest(
     ex: &[Exchange],
     console: &[ConsoleLine],
     navs: &[Navigation],
+    filter: Option<&str>,
+    total: usize,
 ) -> String {
     let mut s = String::new();
     s.push_str(&format!(
-        "CAPTURED SESSION — target {target}\n{} requests total, {} failed, {} console errors\n\n",
+        "CAPTURED SESSION — target {target}\n{} requests, {} failed, {} console errors\n",
         ex.len(),
         ex.iter().filter(|e| e.is_error()).count(),
         console.iter().filter(|c| c.severity == "error").count()
     ));
+    // The model must not generalise from a slice to the whole session.
+    if let Some(f) = filter {
+        s.push_str(&format!(
+            "NOTE: this is a FILTERED view — {f}. {} of {total} captured requests are shown. \
+             Answer only about what is here, and say your answer covers this filtered view \
+             rather than the whole session.\n",
+            ex.len()
+        ));
+    }
+    s.push('\n');
 
     if !navs.is_empty() {
         s.push_str("PAGE NAVIGATIONS (in order):\n");
@@ -583,6 +595,7 @@ mod tests {
                 url: None,
                 line: None,
                 source: "console".into(),
+                page_url: None,
             }],
         )
         .unwrap();

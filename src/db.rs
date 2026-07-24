@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS console (
     text       TEXT NOT NULL,
     url        TEXT,
     line       INTEGER,
-    source     TEXT
+    source     TEXT,
+    page_url   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_console_session ON console(session_id);
 
@@ -112,16 +113,18 @@ pub type Headers = BTreeMap<String, String>;
 /// exists, so a session recorded before page tracking would fail every query
 /// mentioning `page_url`. Adding it is safe and idempotent.
 fn migrate(conn: &Connection) -> Result<()> {
-    let mut have: Vec<String> = Vec::new();
-    {
-        let mut stmt = conn.prepare("PRAGMA table_info(requests)")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-        for c in rows {
-            have.push(c?);
+    for table in ["requests", "console"] {
+        let mut have: Vec<String> = Vec::new();
+        {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            for c in rows {
+                have.push(c?);
+            }
         }
-    }
-    if !have.is_empty() && !have.iter().any(|c| c == "page_url") {
-        conn.execute_batch("ALTER TABLE requests ADD COLUMN page_url TEXT")?;
+        if !have.is_empty() && !have.iter().any(|c| c == "page_url") {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN page_url TEXT"))?;
+        }
     }
     Ok(())
 }
@@ -297,6 +300,18 @@ pub struct ConsoleLine {
     pub url: Option<String>,
     pub line: Option<i64>,
     pub source: String,
+    /// Page in effect when this was logged, so a page filter narrows the console
+    /// in step with the request list.
+    pub page_url: Option<String>,
+}
+
+impl ConsoleLine {
+    pub fn page_path(&self) -> String {
+        match &self.page_url {
+            Some(u) => path_of(u),
+            None => "(before first navigation)".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -526,9 +541,11 @@ impl Db {
                 }
                 Write::Console(c) => {
                     tx.execute(
-                        "INSERT INTO console (session_id, ts, severity, text, url, line, source)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                        params![sid, c.ts, c.severity, c.text, c.url, c.line, c.source],
+                        "INSERT INTO console (session_id, ts, severity, text, url, line, source, page_url)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                        params![
+                            sid, c.ts, c.severity, c.text, c.url, c.line, c.source, c.page_url
+                        ],
                     )?;
                 }
                 Write::Navigation { ts, url, is_main } => {
@@ -610,7 +627,7 @@ impl Db {
 
     pub fn console(&self, session_id: i64) -> Result<Vec<ConsoleLine>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, severity, text, url, line, source FROM console
+            "SELECT ts, severity, text, url, line, source, page_url FROM console
              WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map([session_id], |r| {
@@ -621,6 +638,7 @@ impl Db {
                 url: r.get(3)?,
                 line: r.get(4)?,
                 source: r.get(5)?,
+                page_url: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -750,6 +768,7 @@ mod tests {
                 url: None,
                 line: None,
                 source: "exception".into(),
+                page_url: None,
             })])
             .unwrap();
             db.finish().unwrap();

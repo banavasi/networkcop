@@ -463,6 +463,7 @@ async fn ingest(app: &mut App, cap: Capture, writes: &mpsc::Sender<DbWrite>) {
                 url: c.url.clone(),
                 line: c.line,
                 source: c.source.clone(),
+                page_url: app.current_page.clone(),
             };
             app.console.push(line.clone());
             let _ = writes.send(DbWrite::Console(line)).await;
@@ -855,11 +856,19 @@ async fn submit(
 
     // Snapshot the session from what the UI already holds — no DB round-trip,
     // and no risk of reading a half-written batch.
+    //
+    // The agent sees exactly what the filters show. Exporting "the session" while
+    // the user is looking at one page would be a quiet lie; `esc` clears filters
+    // when the whole session is wanted, and the digest tells the model it is
+    // looking at a slice so it cannot generalise from one.
+    let visible = app.visible();
     let session = Session {
         target: target.to_string(),
-        exchanges: app.exchanges.clone(),
-        console: app.console.clone(),
+        exchanges: visible.iter().map(|i| app.exchanges[*i].clone()).collect(),
+        console: app.visible_console().into_iter().cloned().collect(),
         navigations: app.navigations.clone(),
+        filter: app.filters_active().then(|| app.filter_label()),
+        total_exchanges: app.exchanges.len(),
     };
     let backend = backend.clone();
     let db_path = db_path.to_path_buf();
