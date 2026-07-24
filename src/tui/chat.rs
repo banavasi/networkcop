@@ -72,12 +72,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!("{caret} "),
-                Style::default().fg(if focused { Color::Cyan } else { Color::DarkGray }),
+                Style::default().fg(if focused {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }),
             ),
-            Span::styled(
-                app.input.buf.clone(),
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(app.input.buf.clone(), Style::default().fg(Color::White)),
         ])),
         input_area,
     );
@@ -94,10 +95,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 /// Render one message. Split out so the transcript shape is testable.
 pub fn render_msg(role: ChatRole, text: &str) -> Vec<Line<'static>> {
     let (prefix, style) = match role {
-        ChatRole::User => (
-            "you › ",
-            Style::default().fg(Color::Cyan).bold(),
-        ),
+        ChatRole::User => ("you › ", Style::default().fg(Color::Cyan).bold()),
         ChatRole::Agent => ("", Style::default().fg(Color::Gray)),
         ChatRole::System => ("", Style::default().fg(Color::DarkGray).italic()),
     };
@@ -131,7 +129,12 @@ mod tests {
     fn flat(lines: &[Line]) -> String {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -41,10 +41,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         tabs.push(Span::styled(
             name.to_string(),
             if on {
-                Style::default()
-                    .fg(method_color(name))
-                    .bold()
-                    .underlined()
+                Style::default().fg(method_color(name)).bold().underlined()
             } else {
                 Style::default().fg(Color::DarkGray)
             },
@@ -282,8 +279,7 @@ pub fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(Line::from(title).style(Style::default().fg(Color::Cyan).bold()))
         .title_bottom(
-            Line::from(" ↑↓ scroll · esc/enter close ")
-                .style(Style::default().fg(Color::DarkGray)),
+            Line::from(" ↑↓ scroll · esc/enter close ").style(Style::default().fg(Color::DarkGray)),
         );
     let inner = block.inner(modal);
     f.render_widget(block, modal);
@@ -296,10 +292,7 @@ pub fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         lines.drain(..off);
     }
 
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Built separately from rendering so it can be asserted in tests.
@@ -451,10 +444,18 @@ mod tests {
     fn json_bodies_are_pretty_printed() {
         let text: String = detail_lines(&sample())
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("\"error\": \"empty_line_item\""), "pretty JSON");
+        assert!(
+            text.contains("\"error\": \"empty_line_item\""),
+            "pretty JSON"
+        );
     }
 
     #[test]
@@ -466,7 +467,12 @@ mod tests {
         };
         let text: String = detail_lines(&e)
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("(empty)"));
@@ -479,7 +485,12 @@ mod tests {
         e.truncated_from = Some(12_279_560);
         let text: String = detail_lines(&e)
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("truncated"));

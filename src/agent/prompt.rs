@@ -95,7 +95,10 @@ mod tests {
     #[test]
     fn slug_is_branch_safe_and_bounded() {
         assert_eq!(slugify("Checkout returns 500"), "checkout-returns-500");
-        assert_eq!(slugify("  POST /api/cart -- FAILS!! "), "post-api-cart-fails");
+        assert_eq!(
+            slugify("  POST /api/cart -- FAILS!! "),
+            "post-api-cart-fails"
+        );
         assert_eq!(slugify("!!!"), "session-issue");
         assert_eq!(slugify(""), "session-issue");
         // capped at six words so branch names stay usable

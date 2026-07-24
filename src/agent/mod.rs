@@ -70,7 +70,12 @@ impl Session {
     }
 
     pub fn digest(&self) -> String {
-        tools::digest(&self.target, &self.exchanges, &self.console, &self.navigations)
+        tools::digest(
+            &self.target,
+            &self.exchanges,
+            &self.console,
+            &self.navigations,
+        )
     }
 
     /// Nothing captured yet — every command should say so rather than
@@ -215,7 +220,9 @@ pub async fn handle(
                 let title = bug_title(&bug, "");
                 let fix = fix_prompt(&slugify(&title), &bug);
                 let filed = match tools::JiraConfig::from_env() {
-                    None => "JIRA_BASE_URL / JIRA_API_TOKEN not set — ticket not filed.".to_string(),
+                    None => {
+                        "JIRA_BASE_URL / JIRA_API_TOKEN not set — ticket not filed.".to_string()
+                    }
                     Some(cfg) => {
                         let body = format!("{bug}\n\n{fix}");
                         match tools::create_jira_issue(&cfg, &title, &body).await {
@@ -387,18 +394,26 @@ mod tests {
 
     #[test]
     fn classifies_commands_and_free_text() {
-        assert_eq!(classify("why did checkout fail?"),
-                   Intent::Ask("why did checkout fail?".into()));
+        assert_eq!(
+            classify("why did checkout fail?"),
+            Intent::Ask("why did checkout fail?".into())
+        );
         assert_eq!(classify("/review"), Intent::Review);
         assert_eq!(classify("  /review  "), Intent::Review);
-        assert_eq!(classify("/save-page checkout"),
-                   Intent::SavePage("checkout".into()));
+        assert_eq!(
+            classify("/save-page checkout"),
+            Intent::SavePage("checkout".into())
+        );
         assert_eq!(classify("/save-page"), Intent::SavePage("page".into()));
-        assert_eq!(classify("/reproduce the 500"),
-                   Intent::Reproduce("the 500".into()));
+        assert_eq!(
+            classify("/reproduce the 500"),
+            Intent::Reproduce("the 500".into())
+        );
         assert_eq!(classify("/export"), Intent::Export(None));
-        assert_eq!(classify("/export api.yaml"),
-                   Intent::Export(Some("api.yaml".into())));
+        assert_eq!(
+            classify("/export api.yaml"),
+            Intent::Export(Some("api.yaml".into()))
+        );
     }
 
     #[test]

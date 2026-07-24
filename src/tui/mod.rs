@@ -24,12 +24,12 @@ pub struct Layout4 {
 
 /// Split a frame into the mandated geometry.
 pub fn split(area: Rect) -> Layout4 {
-    let rows = Layout::vertical([Constraint::Percentage(75), Constraint::Percentage(25)])
-        .split(area);
-    let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[0]);
-    let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[1]);
+    let rows =
+        Layout::vertical([Constraint::Percentage(75), Constraint::Percentage(25)]).split(area);
+    let top =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
+    let bottom =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
     Layout4 {
         overview: top[0],
         network: top[1],
@@ -196,7 +196,11 @@ mod tests {
         assert_eq!(status_style(Some(301), false).fg, Some(Color::Cyan));
         assert_eq!(status_style(Some(404), false).fg, Some(Color::Yellow));
         assert_eq!(status_style(Some(500), false).fg, Some(Color::Red));
-        assert_eq!(status_style(Some(200), true).fg, Some(Color::Red), "net failure wins");
+        assert_eq!(
+            status_style(Some(200), true).fg,
+            Some(Color::Red),
+            "net failure wins"
+        );
     }
 
     #[test]

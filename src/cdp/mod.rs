@@ -127,7 +127,10 @@ impl Cdp {
                 }),
             )
             .await?;
-        Ok(v["result"]["value"].as_str().unwrap_or_default().to_string())
+        Ok(v["result"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
     }
 
     pub async fn current_url(&self) -> Result<String> {
@@ -137,7 +140,10 @@ impl Cdp {
                 json!({ "expression": "location.href", "returnByValue": true }),
             )
             .await?;
-        Ok(v["result"]["value"].as_str().unwrap_or_default().to_string())
+        Ok(v["result"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
     }
 }
 

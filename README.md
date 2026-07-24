@@ -44,6 +44,30 @@ cargo build --release
 ./target/release/networkcop 8080
 ```
 
+## Updating
+
+```bash
+cargo install networkcop --force     # update to the newest release
+networkcop update                    # is there one?
+networkcop update --json             # same, machine-readable
+```
+
+networkcop checks crates.io once at startup and, if a newer version exists, says so
+in the agent pane:
+
+```
+networkcop 0.3.0 is available (you have 0.2.0) — update with:
+  cargo install networkcop --force
+```
+
+The check is deliberately unobtrusive: it runs in the background, never delays
+capture, and treats being offline, rate-limited, or crates.io being down as "no
+news" rather than an error. Turn it off with `--no-update-check` or
+`NETWORKCOP_NO_UPDATE_CHECK=1` — which CI sets by default.
+
+`networkcop update` exits 0 whether or not an update exists, so it is safe in a
+scripted health check; read `.update_available` from the JSON form.
+
 ## Usage
 
 ```bash
@@ -229,11 +253,29 @@ gets refused rather than trusted.
 ## Contributing
 
 ```bash
-cargo test                              # 51 tests, no network needed
+cargo test                              # 69 tests, no network needed
 cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 cargo run --example probe -- 8080       # re-run the CDP body-capture spike
-cargo run --example guard               # re-run the guardrail corpus (costs ~$0.40)
+cargo run --example guard               # re-run the guardrail corpus (costs ~$0.30)
 ```
+
+### Releasing
+
+Nothing publishes from a laptop. `scripts/release.sh` bumps the version, runs the
+same gates CI runs, then tags and pushes; the `Release` workflow does the upload.
+
+```bash
+./scripts/release.sh 0.2.1 --dry-run    # rehearse
+./scripts/release.sh 0.2.1              # bump, tag, push → CI publishes
+gh run watch --exit-status              # follow it
+```
+
+The workflow refuses to publish when the tag disagrees with `Cargo.toml`, and skips
+the upload when that version is already on crates.io — both because crates.io
+versions are immutable and a wrong one cannot be withdrawn. `workflow_dispatch`
+runs every gate with `dry_run: true` by default if you want to exercise it without
+publishing.
 
 Architecture decisions live in [`docs/adr/`](docs/adr/) — read
 [0002](docs/adr/0002-networkcop-architecture.md) first; it records the two spikes

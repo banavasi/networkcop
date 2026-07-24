@@ -123,7 +123,11 @@ async fn claude_cli(model: &str, payload: &str) -> Result<(String, f64)> {
     .stderr(Stdio::null())
     .kill_on_drop(true);
     // don't let the child believe it is nested inside another claude session
-    for var in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] {
+    for var in [
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SSE_PORT",
+    ] {
         cmd.env_remove(var);
     }
 
@@ -178,7 +182,10 @@ mod tests {
 
     #[test]
     fn accepts_a_clean_in_scope_envelope() {
-        let a = validate(r#"{"in_scope": true, "answer": "POST /x returned 500."}"#, 0.02);
+        let a = validate(
+            r#"{"in_scope": true, "answer": "POST /x returned 500."}"#,
+            0.02,
+        );
         assert!(!a.refused);
         assert_eq!(a.text, "POST /x returned 500.");
     }

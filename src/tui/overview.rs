@@ -57,17 +57,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     // Bars are positioned by arrival order and scaled by duration; the point is
     // to show which calls are slow and where they cluster, not wall-clock truth.
     let rows = inner.height.saturating_sub(4) as usize;
-    let recent: Vec<_> = app
-        .exchanges
-        .iter()
-        .rev()
-        .take(rows)
-        .rev()
-        .collect();
-    let max_ms = recent
-        .iter()
-        .map(|e| e.duration_ms)
-        .fold(1.0_f64, f64::max);
+    let recent: Vec<_> = app.exchanges.iter().rev().take(rows).rev().collect();
+    let max_ms = recent.iter().map(|e| e.duration_ms).fold(1.0_f64, f64::max);
     let track = inner.width.saturating_sub(20) as usize;
 
     for e in &recent {
@@ -174,7 +165,10 @@ mod tests {
 
     #[test]
     fn paths_shorten_to_something_readable() {
-        assert_eq!(short_path("http://localhost:8080/checkout?step=2"), "/checkout");
+        assert_eq!(
+            short_path("http://localhost:8080/checkout?step=2"),
+            "/checkout"
+        );
         assert_eq!(short_path("http://localhost:8080"), "/");
         assert_eq!(short_path("http://localhost:8080/"), "/");
         assert_eq!(short_path("about:blank"), "/");

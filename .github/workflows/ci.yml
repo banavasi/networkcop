@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # a failed update check must never be what breaks a build
+  NETWORKCOP_NO_UPDATE_CHECK: "1"
+
+jobs:
+  check:
+    name: test · clippy · fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustc --version && cargo --version
+
+      # first-party cache only — no third-party action in the credentialed path
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets
+
+      - name: Release build must be warning-free
+        run: cargo build --release
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      # The spikes need Chrome and a live model; they are not run here. What CI
+      # can check is that they still compile against the shipping code — guard.rs
+      # imports the real system prompt, so a prompt change that breaks it is a
+      # build failure rather than a silent drift.
+      - name: Examples compile
+        run: cargo build --examples
+
+      - name: Package is publishable
+        run: cargo publish --dry-run

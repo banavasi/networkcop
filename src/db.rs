@@ -356,7 +356,9 @@ impl Db {
         let session_id = match session_id {
             Some(id) => id,
             None => conn
-                .query_row("SELECT MAX(id) FROM sessions", [], |r| r.get::<_, Option<i64>>(0))
+                .query_row("SELECT MAX(id) FROM sessions", [], |r| {
+                    r.get::<_, Option<i64>>(0)
+                })
                 .optional()?
                 .flatten()
                 .context("no sessions recorded yet")?,

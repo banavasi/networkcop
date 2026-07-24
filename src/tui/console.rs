@@ -99,16 +99,15 @@ mod tests {
     /// with the right severity colour. A console pane wired to nothing fails here.
     #[test]
     fn a_canned_error_event_renders_a_coloured_row() {
-        let l = render(&line("error", "Uncaught TypeError: t.total is undefined"), 80);
+        let l = render(
+            &line("error", "Uncaught TypeError: t.total is undefined"),
+            80,
+        );
         let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("10:14:02"), "timestamp: {text}");
         assert!(text.contains("ERROR"), "severity: {text}");
         assert!(text.contains("TypeError"), "message: {text}");
-        assert_eq!(
-            l.spans[1].style.fg,
-            Some(Color::Red),
-            "errors must be red"
-        );
+        assert_eq!(l.spans[1].style.fg, Some(Color::Red), "errors must be red");
         assert_eq!(l.spans[2].style.fg, Some(Color::Red));
     }
 

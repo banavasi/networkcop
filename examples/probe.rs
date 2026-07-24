@@ -70,7 +70,12 @@ async fn main() -> Result<()> {
     };
 
     // enable the domains we care about
-    for method in ["Network.enable", "Page.enable", "Runtime.enable", "Log.enable"] {
+    for method in [
+        "Network.enable",
+        "Page.enable",
+        "Runtime.enable",
+        "Log.enable",
+    ] {
         let msg = json!({"id": next(), "method": method});
         sock.send(msg.to_string().into()).await?;
     }

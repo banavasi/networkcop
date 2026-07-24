@@ -81,6 +81,10 @@ struct Cli {
     #[arg(long)]
     dump_layout: bool,
 
+    /// Skip the crates.io update check on startup.
+    #[arg(long, env = "NETWORKCOP_NO_UPDATE_CHECK")]
+    no_update_check: bool,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -93,6 +97,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Check crates.io for a newer release.
+    Update {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -101,9 +111,8 @@ fn main() -> Result<()> {
     // --dump-layout needs no runtime, no browser, no database.
     if cli.dump_layout {
         let l = tui::split(Rect::new(0, 0, 200, 100));
-        let j = |r: Rect| {
-            serde_json::json!({"x": r.x, "y": r.y, "width": r.width, "height": r.height})
-        };
+        let j =
+            |r: Rect| serde_json::json!({"x": r.x, "y": r.y, "width": r.width, "height": r.height});
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -125,8 +134,10 @@ fn main() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     let db_path = cli.db.clone().unwrap_or_else(Db::default_path);
 
-    if let Some(Cmd::Sessions { json }) = &cli.cmd {
-        return list_sessions(&db_path, *json);
+    match &cli.cmd {
+        Some(Cmd::Sessions { json }) => return list_sessions(&db_path, *json),
+        Some(Cmd::Update { json }) => return check_for_update(*json).await,
+        None => {}
     }
 
     let target = cli
@@ -209,6 +220,17 @@ async fn run(cli: Cli) -> Result<()> {
     // agent replies come back on this channel so the UI never blocks
     let (agent_tx, mut agent_rx) = mpsc::channel::<(String, f64)>(8);
 
+    // Update check runs off the critical path: a slow or unreachable crates.io
+    // must never delay capture.
+    let (update_tx, mut update_rx) = mpsc::channel::<String>(1);
+    if !cli.no_update_check {
+        tokio::spawn(async move {
+            if let Some(v) = networkcop::update::check().await {
+                let _ = update_tx.send(networkcop::update::announcement(&v)).await;
+            }
+        });
+    }
+
     let mut events = EventStream::new();
     let mut layout = tui::Layout4::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
@@ -252,6 +274,10 @@ async fn run(cli: Cli) -> Result<()> {
                 }).await;
             }
 
+            Some(msg) = update_rx.recv() => {
+                app.say(ChatRole::System, msg);
+            }
+
             _ = sigint.recv() => { app.should_quit = true; }
             _ = sigterm.recv() => { app.should_quit = true; }
 
@@ -261,7 +287,12 @@ async fn run(cli: Cli) -> Result<()> {
 
     // --- shutdown: always flush ---
     disable_raw_mode().ok();
-    execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        term.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
     term.show_cursor().ok();
 
     // Snapshot the final DOM before Chrome goes away.
@@ -441,7 +472,10 @@ async fn ingest(app: &mut App, cap: Capture, writes: &mpsc::Sender<DbWrite>) {
         }
         Capture::Detached(msg) => {
             app.status = msg.clone();
-            app.say(ChatRole::System, format!("{msg} — captured data is still queryable."));
+            app.say(
+                ChatRole::System,
+                format!("{msg} — captured data is still queryable."),
+            );
         }
     }
 }
@@ -514,8 +548,10 @@ async fn on_key(
             KeyCode::Enter => {
                 let text = app.input.take();
                 if !text.trim().is_empty() {
-                    submit(app, text, writes, agent_tx, backend, db_path, session_id, target, out_dir)
-                        .await;
+                    submit(
+                        app, text, writes, agent_tx, backend, db_path, session_id, target, out_dir,
+                    )
+                    .await;
                 }
                 return;
             }
@@ -788,11 +824,64 @@ async fn ask_once(
     let session_id = db.session_id;
     // the recorded target, not whatever the current flags imply
     let recorded = db.target(session_id).unwrap_or_default();
-    let target = if recorded.is_empty() { target } else { &recorded };
+    let target = if recorded.is_empty() {
+        target
+    } else {
+        &recorded
+    };
     let session = Session::load(&db, session_id, target)?;
     let intent = agent::classify(question);
     let reply = agent::handle(intent, &session, backend, &mut db, out_dir).await?;
     println!("{}", reply.text);
+    Ok(())
+}
+
+/// `networkcop update` — report whether a newer release exists.
+///
+/// Exits 0 whether or not an update is available; a failed check is reported
+/// but is not an error, so this is safe in a scripted health check.
+async fn check_for_update(json: bool) -> Result<()> {
+    use networkcop::update;
+    let latest = update::latest().await;
+    match latest {
+        Ok(latest) => {
+            let available = update::is_newer(&latest, update::CURRENT);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "current": update::CURRENT,
+                        "latest": latest,
+                        "update_available": available,
+                        "command": update::UPDATE_COMMAND,
+                    }))?
+                );
+            } else if available {
+                println!("{}", update::announcement(&latest));
+            } else {
+                println!("networkcop {} is up to date.", update::CURRENT);
+            }
+        }
+        Err(e) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "current": update::CURRENT,
+                        "latest": serde_json::Value::Null,
+                        "update_available": false,
+                        "error": e.to_string(),
+                    }))?
+                );
+            } else {
+                println!(
+                    "networkcop {} — could not reach crates.io ({e}).\nUpdate anyway with:\n  {}",
+                    update::CURRENT,
+                    update::UPDATE_COMMAND
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -900,7 +989,9 @@ mod tests {
         app.set_domain(Some("cdn.co".into()));
         let rows = networkcop::tui::network::domain_rows(&app);
         assert!(!rows[0].2);
-        assert!(rows.iter().any(|(l, c, a)| l == "cdn.co" && *c == Some(1) && *a));
+        assert!(rows
+            .iter()
+            .any(|(l, c, a)| l == "cdn.co" && *c == Some(1) && *a));
     }
 
     #[test]

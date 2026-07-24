@@ -177,7 +177,10 @@ pub fn openapi(target: &str, ex: &[Exchange]) -> Result<String> {
     let mut root = yaml::Mapping::new();
     root.insert("openapi".into(), "3.1.0".into());
     let mut info = yaml::Mapping::new();
-    info.insert("title".into(), format!("Captured session — {target}").into());
+    info.insert(
+        "title".into(),
+        format!("Captured session — {target}").into(),
+    );
     info.insert("version".into(), "1.0.0".into());
     info.insert(
         "description".into(),
@@ -252,18 +255,16 @@ fn urldecode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            b'%' if i + 2 < b.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(v) => {
-                        out.push(v);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(b[i]);
-                        i += 1;
-                    }
+            b'%' if i + 2 < b.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(v) => {
+                    out.push(v);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            },
             b'+' => {
                 out.push(b' ');
                 i += 1;
@@ -343,7 +344,10 @@ fn headers_map(h: &BTreeMap<String, String>) -> yaml::Value {
 pub fn primary_failure(ex: &[Exchange]) -> Option<&Exchange> {
     ex.iter()
         .find(|e| e.status.map(|s| s >= 500).unwrap_or(false))
-        .or_else(|| ex.iter().find(|e| e.status.map(|s| s >= 400).unwrap_or(false)))
+        .or_else(|| {
+            ex.iter()
+                .find(|e| e.status.map(|s| s >= 400).unwrap_or(false))
+        })
         .or_else(|| ex.iter().find(|e| e.error.is_some()))
 }
 
@@ -438,7 +442,11 @@ impl JiraConfig {
 }
 
 /// Create a Jira issue. Returns the issue key.
-pub async fn create_jira_issue(cfg: &JiraConfig, summary: &str, description: &str) -> Result<String> {
+pub async fn create_jira_issue(
+    cfg: &JiraConfig,
+    summary: &str,
+    description: &str,
+) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
         .build()?;
@@ -521,7 +529,12 @@ mod tests {
 
     #[test]
     fn openapi_is_valid_yaml_with_captured_examples() {
-        let mut e = ex("POST", "http://localhost:8080/api/cart?debug=1", 500, "application/json");
+        let mut e = ex(
+            "POST",
+            "http://localhost:8080/api/cart?debug=1",
+            500,
+            "application/json",
+        );
         e.req_body = Some(r#"{"qty":0}"#.into());
         e.res_body = Some(br#"{"error":"empty_line_item"}"#.to_vec());
         e.status_text = Some("Internal Server Error".into());

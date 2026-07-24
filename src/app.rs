@@ -374,7 +374,11 @@ impl App {
 
     pub fn counters(&self) -> (usize, usize, usize) {
         let failed = self.exchanges.iter().filter(|e| e.is_error()).count();
-        let errs = self.console.iter().filter(|c| c.severity == "error").count();
+        let errs = self
+            .console
+            .iter()
+            .filter(|c| c.severity == "error")
+            .count();
         (self.exchanges.len(), failed, errs)
     }
 
@@ -541,11 +545,21 @@ mod tests {
         assert!(sw.is_rest(), "API shape counts however it was issued");
 
         // the common case: both
-        let both = full("POST", "http://localhost:8080/api/cart", "Fetch", "application/json");
+        let both = full(
+            "POST",
+            "http://localhost:8080/api/cart",
+            "Fetch",
+            "application/json",
+        );
         assert!(both.is_ajax() && both.is_rest());
 
         // an XHR that pulled a template is neither REST nor static
-        let tpl = full("GET", "http://localhost:8080/views/cart.html", "XHR", "text/html");
+        let tpl = full(
+            "GET",
+            "http://localhost:8080/views/cart.html",
+            "XHR",
+            "text/html",
+        );
         assert!(tpl.is_ajax());
         assert!(!tpl.is_rest());
     }
@@ -574,10 +588,25 @@ mod tests {
     fn the_three_filter_axes_and_together() {
         let mut app = App::new("t".into());
         app.exchanges = vec![
-            full("GET", "http://localhost:8080/api/me", "XHR", "application/json"),
-            full("POST", "http://localhost:8080/api/cart", "XHR", "application/json"),
+            full(
+                "GET",
+                "http://localhost:8080/api/me",
+                "XHR",
+                "application/json",
+            ),
+            full(
+                "POST",
+                "http://localhost:8080/api/cart",
+                "XHR",
+                "application/json",
+            ),
             full("POST", "https://analytics.co/collect", "XHR", "text/plain"),
-            full("GET", "http://localhost:8080/main.js", "Script", "text/javascript"),
+            full(
+                "GET",
+                "http://localhost:8080/main.js",
+                "Script",
+                "text/javascript",
+            ),
         ];
         assert_eq!(app.visible().len(), 4);
 
@@ -618,7 +647,12 @@ mod tests {
     fn domain_counts_ignore_other_filters() {
         let mut app = App::new("t".into());
         app.exchanges = vec![
-            full("GET", "http://localhost:8080/main.js", "Script", "text/javascript"),
+            full(
+                "GET",
+                "http://localhost:8080/main.js",
+                "Script",
+                "text/javascript",
+            ),
             full("GET", "https://cdn.co/lib.js", "Script", "text/javascript"),
         ];
         app.set_kind(Kind::Rest); // hides everything

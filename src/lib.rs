@@ -8,3 +8,4 @@ pub mod app;
 pub mod cdp;
 pub mod db;
 pub mod tui;
+pub mod update;
