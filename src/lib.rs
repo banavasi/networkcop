@@ -6,6 +6,8 @@
 pub mod agent;
 pub mod app;
 pub mod cdp;
+pub mod clipboard;
+pub mod copy;
 pub mod db;
 pub mod tui;
 pub mod update;

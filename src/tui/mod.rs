@@ -1,7 +1,13 @@
 //! The four-pane layout and its widgets.
 //!
-//! Layout is fixed by spec: top row split 50/50, bottom row 25% of the height,
-//! console bottom-left and agent bottom-right.
+//! Network is the mainstream pane and gets the largest share:
+//!
+//!   left 60%                          right 40%
+//!   ┌──────────────────────────────┬──────────────────┐
+//!   │ Network              75%     │ Session      50% │
+//!   ├──────────────────────────────┤──────────────────┤
+//!   │ Console              25%     │ Agent        50% │
+//!   └──────────────────────────────┴──────────────────┘
 
 mod chat;
 mod console;
@@ -22,19 +28,19 @@ pub struct Layout4 {
     pub chat: Rect,
 }
 
-/// Split a frame into the mandated geometry.
+/// Split a frame into the pane geometry.
 pub fn split(area: Rect) -> Layout4 {
-    let rows =
-        Layout::vertical([Constraint::Percentage(75), Constraint::Percentage(25)]).split(area);
-    let top =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
-    let bottom =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    let left =
+        Layout::vertical([Constraint::Percentage(75), Constraint::Percentage(25)]).split(cols[0]);
+    let right =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(cols[1]);
     Layout4 {
-        overview: top[0],
-        network: top[1],
-        console: bottom[0],
-        chat: bottom[1],
+        network: left[0],
+        console: left[1],
+        overview: right[0],
+        chat: right[1],
     }
 }
 
@@ -147,37 +153,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_matches_the_specified_geometry() {
+    fn layout_gives_network_the_largest_share() {
         let area = Rect::new(0, 0, 200, 100);
         let l = split(area);
 
-        // bottom row is 25% of the height
+        // left column 60%, right 40%
+        assert_eq!(l.network.width, 120);
+        assert_eq!(l.console.width, 120);
+        assert_eq!(l.overview.width, 80);
+        assert_eq!(l.chat.width, 80);
+        assert_eq!(l.network.x, 0);
+        assert_eq!(l.overview.x, 120);
+
+        // left column: network 75%, console 25%
+        assert_eq!(l.network.height, 75);
         assert_eq!(l.console.height, 25);
-        assert_eq!(l.chat.height, 25);
-        assert_eq!(l.overview.height, 75);
-
-        // top row splits 50/50
-        assert_eq!(l.overview.width, 100);
-        assert_eq!(l.network.width, 100);
-        assert_eq!(l.overview.x, 0);
-        assert_eq!(l.network.x, 100);
-
-        // console bottom-left, chat bottom-right
-        assert_eq!(l.console.x, 0);
-        assert_eq!(l.chat.x, 100);
         assert_eq!(l.console.y, 75);
+
+        // right column: split evenly
+        assert_eq!(l.overview.height, 50);
+        assert_eq!(l.chat.height, 50);
+        assert_eq!(l.chat.y, 50);
+
+        // network is the mainstream pane — bigger than everything else combined
+        let others = l.console.area() + l.overview.area() + l.chat.area();
+        assert!(
+            l.network.area() > others / 2,
+            "network {} vs others {others}",
+            l.network.area()
+        );
     }
 
     #[test]
     fn every_pane_is_clickable_and_regions_do_not_overlap() {
         let l = split(Rect::new(0, 0, 200, 100));
-        assert_eq!(pane_at(&l, 10, 10), Some(Pane::Overview));
-        assert_eq!(pane_at(&l, 150, 10), Some(Pane::Network));
+        assert_eq!(pane_at(&l, 10, 10), Some(Pane::Network));
         assert_eq!(pane_at(&l, 10, 90), Some(Pane::Console));
+        assert_eq!(pane_at(&l, 150, 10), Some(Pane::Overview));
         assert_eq!(pane_at(&l, 150, 90), Some(Pane::Chat));
         // boundaries belong to exactly one pane
-        assert_eq!(pane_at(&l, 99, 74), Some(Pane::Overview));
-        assert_eq!(pane_at(&l, 100, 75), Some(Pane::Chat));
+        assert_eq!(pane_at(&l, 119, 74), Some(Pane::Network));
+        assert_eq!(pane_at(&l, 120, 50), Some(Pane::Chat));
+
+        // no column of the frame is claimed twice
+        for x in (0..200).step_by(7) {
+            for y in (0..100).step_by(7) {
+                assert!(pane_at(&l, x, y).is_some(), "({x},{y}) belongs to no pane");
+            }
+        }
     }
 
     #[test]

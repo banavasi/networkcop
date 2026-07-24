@@ -11,19 +11,20 @@ means and it politely refuses. That refusal is the point: an assistant that will
 discuss anything is one you stop trusting to be grounded in the evidence.
 
 ```
-┌ Session overview ─────────────┬ Network (18/561) ──────────────┐
-│ nav  / → /login → /dashboard  │ GET | POST | PATCH | DELETE |… │
-│ GET    ████▌·········   86ms  │ ▍POST /api/auth/login  200 1.2k│
-│ POST   ████████▌·····  341ms  │  POST /api/cart/checkout 500 6…│
-│ GET    ███·········     120ms │  POST /api/telemetry     202 8…│
-│ 561 req · 2 failed · 1 err    │                                │
-├ Console (1 errors) ───────────┼ Agent ($0.023) ────────────────┤
-│ 10:14:02 ERROR  POST /api/ca… │ you › why did checkout fail?   │
-│ 10:14:02 ERROR  TypeError: t… │ POST /api/cart/checkout returned│
-│ 10:14:03 WARN   Cart desync   │ 500. Request body carries qty:0│
-└───────────────────────────────┴────────────────────────────────┘
+┌ Network (18/561) ─────────────────────────┬ Session · by page ──────┐
+│ GET | POST | PATCH | DELETE | OTHER       │ page kind domain status │
+│ AJAX | REST | DOC | STATIC   [d] all  [p] │ on /checkout            │
+│ ▍POST /api/auth/login       200    1.2 kB │                         │
+│  POST /api/cart/checkout    500     612 B │ /checkout    2   1✗     │
+│  GET  /api/orders           200    1.2 kB │ /login       2          │
+│                                           │ /             560       │
+│                                           │ 564 req · 3 failed      │
+├ Console (1 errors) ───────────────────────┼ Agent ($0.023) ─────────┤
+│ 10:14:02 ERROR POST /api/cart/checkout 500│ you › why did checkout  │
+│ 10:14:02 ERROR TypeError: t.total is und… │ POST /api/cart/checkout │
+│ 10:14:03 WARN  Cart state desync          │ returned 500. Body has  │
+└───────────────────────────────────────────┴─────────────────────────┘
 ```
-
 ## Install
 
 ```bash
@@ -87,20 +88,29 @@ networkcop --ask "/review"        # one-shot, against the last session
 | `←` `→` / `1`–`5` | switch method tab (or click it) |
 | `t` / `T` | cycle the kind filter — AJAX, REST, DOC, STATIC |
 | `d` | pick a domain (or click the selector) |
+| `p` | cycle the page filter |
+| `g` | regroup the session overview — page, kind, domain, status |
+| `c` | copy the selected request (or the console, when it has focus) |
+| `e` | copy a full error report |
 | `esc` | clear all filters, or close a modal |
 | `i` | jump to the agent input |
 | `q` / `ctrl-c` | quit — always flushes to disk |
 
+Inside an open request: `c` copies everything, `r` the request, `s` the response,
+`u` a runnable curl, `e` the full error report. Each confirms in the pane title
+("copied 2.1 kB via wl-copy") — silence after a copy key is indistinguishable from a
+broken clipboard.
+
 ### Filtering
 
-Three independent axes that AND together — **method**, **kind**, and **domain**.
-They exist because a real page load is mostly noise: one run against a Vite app
-captured 561 requests, of which 552 were static modules and 6 were the calls anyone
-actually cares about.
+Four independent axes that AND together — **method**, **kind**, **domain** and
+**page**. They exist because a real page load is mostly noise: one run against a Vite
+app captured 561 requests, of which 552 were static modules and 6 were the calls
+anyone actually cares about.
 
 ```
 GET | POST | PATCH | DELETE | OTHER
-AJAX | REST | DOC | STATIC     [d] all domains (12)
+AJAX | REST | DOC | STATIC   [d] all domains (12)   [p] all pages (3)
 ```
 
 **AJAX and REST are different questions**, which is why both exist:
@@ -118,6 +128,37 @@ They overlap heavily but neither contains the other. In the session above,
 The domain picker (`d`) lists every host seen, busiest first, with counts. It is
 often the fastest way to find out that your app's API is not on the host you thought
 it was.
+
+**Page filtering** answers "what does this screen actually call?". Every request is
+stamped with the page that was loaded when it fired, so `p` narrows the list to one
+route. This tracks client-side routing too: a SPA that changes URL via
+`history.pushState` never fires a document navigation, so networkcop also listens for
+`Page.navigatedWithinDocument`. Driving a Vue app through `/checkout` and `/profile`
+attributes `/api/cart` and `/api/me` to the right routes.
+
+### The session overview
+
+The right pane buckets the whole session and re-groups with `g`:
+
+| Group by | Answers |
+|---|---|
+| `page` | which routes call what — the default |
+| `kind` | how much is API vs static noise |
+| `domain` | who you actually talk to |
+| `status` | how much is failing |
+
+Rows with errors sort first, so what needs attention never requires scrolling.
+`enter` on a row applies it as a filter and jumps to the request list.
+
+### Copying
+
+Debugging ends in a paste — into a coding agent, a ticket, a colleague's DM. `e`
+produces a self-contained failure report: the request with headers and body, the
+response, the console errors from that page, the page URL, and a runnable curl. A 500
+without the JavaScript error it triggered is half a bug report, so both are included.
+
+Clipboard goes through `wl-copy`, `xclip`, `xsel` or `pbcopy`, falling back to an
+OSC 52 escape so it still works over SSH and inside tmux. No Rust dependency.
 
 Selecting a request opens the complete exchange: request headers and body, response
 headers and body. Nothing else — no waterfall chrome, no timing breakdown. That is

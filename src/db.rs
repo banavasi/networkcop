@@ -48,11 +48,13 @@ CREATE TABLE IF NOT EXISTS requests (
     from_cache    INTEGER NOT NULL DEFAULT 0,
     remote_ip     TEXT,
     error         TEXT,
+    page_url      TEXT,
     UNIQUE(session_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id);
 CREATE INDEX IF NOT EXISTS idx_requests_status  ON requests(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_requests_method  ON requests(session_id, method);
+CREATE INDEX IF NOT EXISTS idx_requests_page    ON requests(session_id, page_url);
 
 CREATE TABLE IF NOT EXISTS console (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +106,26 @@ CREATE INDEX IF NOT EXISTS idx_chat_session ON chat(session_id);
 
 pub type Headers = BTreeMap<String, String>;
 
+/// Additive migrations for databases written by an older networkcop.
+///
+/// `CREATE TABLE IF NOT EXISTS` will not add a column to a table that already
+/// exists, so a session recorded before page tracking would fail every query
+/// mentioning `page_url`. Adding it is safe and idempotent.
+fn migrate(conn: &Connection) -> Result<()> {
+    let mut have: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(requests)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for c in rows {
+            have.push(c?);
+        }
+    }
+    if !have.is_empty() && !have.iter().any(|c| c == "page_url") {
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN page_url TEXT")?;
+    }
+    Ok(())
+}
+
 /// One captured exchange, as the TUI and agent see it.
 #[derive(Debug, Clone, Default)]
 pub struct Exchange {
@@ -126,6 +148,9 @@ pub struct Exchange {
     pub duration_ms: f64,
     pub from_cache: bool,
     pub error: Option<String>,
+    /// Main-frame URL in effect when this request was issued — the page it
+    /// belongs to. `None` for anything captured before the first navigation.
+    pub page_url: Option<String>,
 }
 
 impl Exchange {
@@ -222,6 +247,14 @@ impl Exchange {
         self.resource_is(&["Document"]) || self.mime().starts_with("text/html")
     }
 
+    /// Path of the page this request belongs to, for grouping and filtering.
+    pub fn page_path(&self) -> String {
+        match &self.page_url {
+            Some(u) => path_of(u),
+            None => "(before first navigation)".into(),
+        }
+    }
+
     /// Scripts, styles, images, fonts, media — the bulk of a dev-server page load.
     pub fn is_static(&self) -> bool {
         if self.resource_is(&["Script", "Stylesheet", "Image", "Font", "Media"]) {
@@ -234,6 +267,25 @@ impl Exchange {
             || m.starts_with("audio/")
             || m.contains("javascript")
             || m.contains("css")
+    }
+}
+
+/// `http://host/a/b?c` → `/a/b`. Shared by page grouping and the request list.
+pub fn path_of(url: &str) -> String {
+    let after = match url.split_once("://") {
+        Some((_, r)) => r,
+        None => url,
+    };
+    match after.find('/') {
+        Some(i) => {
+            let p = after[i..].split('?').next().unwrap_or("/");
+            if p.is_empty() {
+                "/".into()
+            } else {
+                p.to_string()
+            }
+        }
+        None => "/".into(),
     }
 }
 
@@ -275,6 +327,7 @@ pub enum Write {
         resource_type: Option<String>,
         headers: Headers,
         body: Option<String>,
+        page_url: Option<String>,
     },
     Response {
         request_id: String,
@@ -341,6 +394,7 @@ impl Db {
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.execute_batch(SCHEMA).context("apply schema")?;
+        migrate(&conn)?;
         conn.execute(
             "INSERT INTO sessions (started_at, target) VALUES (?1, ?2)",
             params![Utc::now().to_rfc3339(), target],
@@ -353,6 +407,7 @@ impl Db {
     pub fn attach(path: &Path, session_id: Option<i64>) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         let session_id = match session_id {
             Some(id) => id,
             None => conn
@@ -402,11 +457,12 @@ impl Db {
                     resource_type,
                     headers,
                     body,
+                    page_url,
                 } => {
                     tx.execute(
                         "INSERT OR IGNORE INTO requests
-                           (session_id, request_id, ts, method, url, resource_type, req_headers, req_body)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                           (session_id, request_id, ts, method, url, resource_type, req_headers, req_body, page_url)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                         params![
                             sid,
                             request_id,
@@ -415,7 +471,8 @@ impl Db {
                             url,
                             resource_type,
                             serde_json::to_string(headers)?,
-                            body
+                            body,
+                            page_url
                         ],
                     )?;
                 }
@@ -517,7 +574,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, request_id, ts, method, url, resource_type, req_headers, req_body,
                     status, status_text, res_headers, res_body, res_body_b64, truncated_from,
-                    mime_type, size, duration_ms, from_cache, error
+                    mime_type, size, duration_ms, from_cache, error, page_url
              FROM requests WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map([session_id], |r| {
@@ -545,6 +602,7 @@ impl Db {
                 duration_ms: r.get(16)?,
                 from_cache: r.get::<_, i64>(17)? != 0,
                 error: r.get(18)?,
+                page_url: r.get(19)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -645,6 +703,7 @@ mod tests {
                 resource_type: Some("XHR".into()),
                 headers: h.clone(),
                 body: Some(r#"{"qty":0}"#.into()),
+                page_url: Some("http://localhost:8080/cart".into()),
             },
             Write::Response {
                 request_id: "R1".into(),
@@ -721,6 +780,7 @@ mod tests {
                 resource_type: None,
                 headers: Headers::new(),
                 body: None,
+                page_url: None,
             },
             Write::Body {
                 request_id: "R2".into(),

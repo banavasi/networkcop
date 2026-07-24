@@ -48,6 +48,87 @@ pub const METHOD_TABS: [&str; 5] = ["GET", "POST", "PATCH", "DELETE", "OTHER"];
 /// Index that means "no filter".
 pub const TAB_ALL: usize = usize::MAX;
 
+/// How the session overview buckets the traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupBy {
+    /// Which page each request was issued from — answers "what does /checkout call?"
+    Page,
+    Kind,
+    Domain,
+    Status,
+}
+
+impl GroupBy {
+    pub const ALL: [GroupBy; 4] = [
+        GroupBy::Page,
+        GroupBy::Kind,
+        GroupBy::Domain,
+        GroupBy::Status,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupBy::Page => "page",
+            GroupBy::Kind => "kind",
+            GroupBy::Domain => "domain",
+            GroupBy::Status => "status",
+        }
+    }
+
+    /// Bucket an exchange falls into.
+    pub fn bucket(self, e: &Exchange) -> String {
+        match self {
+            GroupBy::Page => e.page_path(),
+            GroupBy::Kind => {
+                // most specific label first; a request can satisfy several
+                if e.is_rest() {
+                    "REST".into()
+                } else if e.is_ajax() {
+                    "AJAX".into()
+                } else if e.is_document() {
+                    "DOC".into()
+                } else if e.is_static() {
+                    "STATIC".into()
+                } else {
+                    "OTHER".into()
+                }
+            }
+            GroupBy::Domain => {
+                let h = e.host();
+                if h.is_empty() {
+                    "(none)".into()
+                } else {
+                    h.to_string()
+                }
+            }
+            GroupBy::Status => match (e.status, &e.error) {
+                (_, Some(_)) => "failed".into(),
+                (Some(s), _) if s >= 500 => "5xx".into(),
+                (Some(s), _) if s >= 400 => "4xx".into(),
+                (Some(s), _) if s >= 300 => "3xx".into(),
+                (Some(s), _) if s >= 200 => "2xx".into(),
+                _ => "pending".into(),
+            },
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let i = GroupBy::ALL.iter().position(|g| *g == self).unwrap_or(0);
+        GroupBy::ALL[(i + 1) % GroupBy::ALL.len()]
+    }
+}
+
+/// One row of the session overview.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub label: String,
+    pub total: usize,
+    pub errors: usize,
+    pub bytes: u64,
+    /// How many of these are API-shaped — the number worth reading.
+    pub rest: usize,
+}
+
 /// What kind of traffic a row is. Filters on this axis are independent of method
 /// and domain — all three AND together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +271,8 @@ pub struct App {
     pub exchanges: Vec<Exchange>,
     pub console: Vec<ConsoleLine>,
     pub navigations: Vec<Navigation>,
+    /// Main-frame URL currently loaded; stamped onto each captured request.
+    pub current_page: Option<String>,
 
     /// Which method tab is active; `TAB_ALL` for no filter.
     pub tab: usize,
@@ -197,6 +280,13 @@ pub struct App {
     pub kind: Kind,
     /// Host filter; `None` shows every domain.
     pub domain: Option<String>,
+    /// Page filter — which page's requests to show.
+    pub page: Option<String>,
+    /// How the session overview buckets traffic.
+    pub group_by: GroupBy,
+    pub group_cursor: usize,
+    /// Transient status line (copy confirmations, errors).
+    pub toast: Option<String>,
     /// Domain picker modal.
     pub domain_picker: bool,
     pub domain_cursor: usize,
@@ -223,9 +313,14 @@ impl App {
             exchanges: Vec::new(),
             console: Vec::new(),
             navigations: Vec::new(),
+            current_page: None,
             tab: TAB_ALL,
             kind: Kind::All,
             domain: None,
+            page: None,
+            group_by: GroupBy::Page,
+            group_cursor: 0,
+            toast: None,
             domain_picker: false,
             domain_cursor: 0,
             selected: 0,
@@ -256,6 +351,11 @@ impl App {
                         .as_deref()
                         .map(|d| e.host() == d)
                         .unwrap_or(true)
+                    && self
+                        .page
+                        .as_deref()
+                        .map(|p| e.page_path() == p)
+                        .unwrap_or(true)
             })
             .map(|(i, _)| i)
             .collect()
@@ -280,6 +380,99 @@ impl App {
         // busiest first, then alphabetical so the order is stable between draws
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
+    }
+
+    /// Overview rows for the current grouping. Errors first, then busiest —
+    /// what needs attention should not require scrolling.
+    pub fn groups(&self) -> Vec<Group> {
+        let mut by: std::collections::HashMap<String, Group> = std::collections::HashMap::new();
+        for e in &self.exchanges {
+            let label = self.group_by.bucket(e);
+            let g = by.entry(label.clone()).or_insert_with(|| Group {
+                label,
+                total: 0,
+                errors: 0,
+                bytes: 0,
+                rest: 0,
+            });
+            g.total += 1;
+            g.bytes += e.size;
+            if e.is_error() {
+                g.errors += 1;
+            }
+            if e.is_rest() {
+                g.rest += 1;
+            }
+        }
+        let mut v: Vec<Group> = by.into_values().collect();
+        v.sort_by(|a, b| {
+            b.errors
+                .cmp(&a.errors)
+                .then_with(|| b.total.cmp(&a.total))
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        v
+    }
+
+    /// Pages seen, in navigation order — the page filter's options.
+    pub fn pages(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for n in &self.navigations {
+            let p = crate::db::path_of(&n.url);
+            if !seen.contains(&p) {
+                seen.push(p);
+            }
+        }
+        // requests captured before any navigation still need a home
+        if self.exchanges.iter().any(|e| e.page_url.is_none()) {
+            seen.push("(before first navigation)".into());
+        }
+        seen
+    }
+
+    pub fn set_page(&mut self, p: Option<String>) {
+        self.page = p;
+        self.selected = 0;
+    }
+
+    pub fn cycle_group(&mut self) {
+        self.group_by = self.group_by.next();
+        self.group_cursor = 0;
+    }
+
+    /// Apply the overview row under the cursor as a filter — click-through from
+    /// "this page made 12 calls" to seeing those 12 calls.
+    pub fn apply_group_selection(&mut self) {
+        let groups = self.groups();
+        let Some(g) = groups.get(self.group_cursor) else {
+            return;
+        };
+        match self.group_by {
+            GroupBy::Page => self.set_page(Some(g.label.clone())),
+            GroupBy::Domain => self.set_domain(Some(g.label.clone())),
+            GroupBy::Kind => {
+                let k = match g.label.as_str() {
+                    "REST" => Kind::Rest,
+                    "AJAX" => Kind::Ajax,
+                    "DOC" => Kind::Doc,
+                    "STATIC" => Kind::Static,
+                    _ => Kind::All,
+                };
+                self.kind = k;
+                self.selected = 0;
+            }
+            // status has no filter axis of its own; jump to the first match instead
+            GroupBy::Status => {
+                let want = g.label.clone();
+                if let Some(pos) = self
+                    .visible()
+                    .iter()
+                    .position(|i| GroupBy::Status.bucket(&self.exchanges[*i]) == want)
+                {
+                    self.selected = pos;
+                }
+            }
+        }
     }
 
     pub fn cycle_kind(&mut self, forward: bool) {
@@ -307,11 +500,15 @@ impl App {
         self.tab = TAB_ALL;
         self.kind = Kind::All;
         self.domain = None;
+        self.page = None;
         self.selected = 0;
     }
 
     pub fn filters_active(&self) -> bool {
-        self.tab != TAB_ALL || self.kind != Kind::All || self.domain.is_some()
+        self.tab != TAB_ALL
+            || self.kind != Kind::All
+            || self.domain.is_some()
+            || self.page.is_some()
     }
 
     /// Compact description of the active filters, for the pane title.
@@ -325,6 +522,9 @@ impl App {
         }
         if let Some(d) = &self.domain {
             parts.push(d.clone());
+        }
+        if let Some(p) = &self.page {
+            parts.push(p.clone());
         }
         parts.join(" · ")
     }
@@ -685,6 +885,167 @@ mod tests {
         app.set_kind(Kind::Rest);
         app.set_domain(Some("api.x.co".into()));
         assert_eq!(app.filter_label(), "POST · REST · api.x.co");
+    }
+
+    fn paged(method: &str, url: &str, rtype: &str, mime: &str, page: &str) -> Exchange {
+        Exchange {
+            method: method.into(),
+            url: url.into(),
+            status: Some(200),
+            resource_type: Some(rtype.into()),
+            mime_type: Some(mime.into()),
+            page_url: Some(page.into()),
+            ..Default::default()
+        }
+    }
+
+    fn multi_page_app() -> App {
+        let mut app = App::new("http://localhost:8080".into());
+        app.exchanges = vec![
+            paged(
+                "GET",
+                "http://x/api/me",
+                "XHR",
+                "application/json",
+                "http://x/login",
+            ),
+            paged(
+                "POST",
+                "http://x/api/auth",
+                "XHR",
+                "application/json",
+                "http://x/login",
+            ),
+            paged(
+                "GET",
+                "http://x/api/cart",
+                "XHR",
+                "application/json",
+                "http://x/checkout",
+            ),
+            paged(
+                "GET",
+                "http://x/main.js",
+                "Script",
+                "text/javascript",
+                "http://x/checkout",
+            ),
+        ];
+        app.exchanges[2].status = Some(500);
+        app.navigations = vec![
+            Navigation {
+                ts: "t".into(),
+                url: "http://x/login".into(),
+            },
+            Navigation {
+                ts: "t".into(),
+                url: "http://x/checkout".into(),
+            },
+        ];
+        app
+    }
+
+    #[test]
+    fn page_filter_shows_only_that_pages_calls() {
+        let mut app = multi_page_app();
+        assert_eq!(app.visible().len(), 4);
+
+        app.set_page(Some("/login".into()));
+        assert_eq!(app.visible().len(), 2, "only the login page's calls");
+
+        app.set_page(Some("/checkout".into()));
+        assert_eq!(app.visible().len(), 2);
+        // and it composes with the other axes
+        app.set_kind(Kind::Rest);
+        assert_eq!(app.visible().len(), 1, "the js file drops out");
+
+        app.clear_filters();
+        assert_eq!(app.visible().len(), 4);
+    }
+
+    #[test]
+    fn pages_are_listed_in_navigation_order() {
+        let app = multi_page_app();
+        assert_eq!(
+            app.pages(),
+            vec!["/login".to_string(), "/checkout".to_string()]
+        );
+    }
+
+    #[test]
+    fn requests_before_any_navigation_still_have_a_home() {
+        let mut app = multi_page_app();
+        app.exchanges.push(Exchange {
+            method: "GET".into(),
+            url: "http://x/early".into(),
+            page_url: None,
+            ..Default::default()
+        });
+        assert!(app
+            .pages()
+            .contains(&"(before first navigation)".to_string()));
+        app.set_page(Some("(before first navigation)".into()));
+        assert_eq!(app.visible().len(), 1);
+    }
+
+    #[test]
+    fn overview_groups_by_page_and_surfaces_errors_first() {
+        let app = multi_page_app();
+        let g = app.groups();
+        assert_eq!(g.len(), 2);
+        // /checkout has the 500, so it sorts first regardless of volume
+        assert_eq!(g[0].label, "/checkout");
+        assert_eq!(g[0].errors, 1);
+        assert_eq!(g[0].total, 2);
+        assert_eq!(g[0].rest, 1, "one API call, one script");
+        assert_eq!(g[1].label, "/login");
+        assert_eq!(g[1].errors, 0);
+    }
+
+    #[test]
+    fn overview_regroups_without_touching_the_filters() {
+        let mut app = multi_page_app();
+        app.group_by = GroupBy::Kind;
+        let g = app.groups();
+        let labels: Vec<&str> = g.iter().map(|x| x.label.as_str()).collect();
+        assert!(labels.contains(&"REST"));
+        assert!(labels.contains(&"STATIC"));
+        assert_eq!(app.visible().len(), 4, "grouping is a view, not a filter");
+
+        app.group_by = GroupBy::Status;
+        let labels: Vec<String> = app.groups().iter().map(|x| x.label.clone()).collect();
+        assert!(labels.contains(&"5xx".to_string()));
+        assert!(labels.contains(&"2xx".to_string()));
+    }
+
+    #[test]
+    fn selecting_an_overview_row_filters_to_it() {
+        let mut app = multi_page_app();
+        app.group_by = GroupBy::Page;
+        app.group_cursor = 0; // /checkout, the one with the error
+        app.apply_group_selection();
+        assert_eq!(app.page.as_deref(), Some("/checkout"));
+        assert_eq!(app.visible().len(), 2);
+
+        app.clear_filters();
+        app.group_by = GroupBy::Kind;
+        let idx = app.groups().iter().position(|g| g.label == "REST").unwrap();
+        app.group_cursor = idx;
+        app.apply_group_selection();
+        assert_eq!(app.kind, Kind::Rest);
+    }
+
+    #[test]
+    fn grouping_cycles_through_every_mode() {
+        let mut app = App::new("t".into());
+        let mut seen = vec![app.group_by];
+        for _ in 0..3 {
+            app.cycle_group();
+            seen.push(app.group_by);
+        }
+        assert_eq!(seen.len(), 4);
+        app.cycle_group();
+        assert_eq!(app.group_by, GroupBy::Page, "wraps");
     }
 
     #[test]

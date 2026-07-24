@@ -18,12 +18,15 @@ pub const LIST_TOP: u16 = 2;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let visible = app.visible();
-    let title = format!(
-        "{} ({}/{})",
-        Pane::Network.title(),
-        visible.len(),
-        app.exchanges.len()
-    );
+    let title = match &app.toast {
+        Some(t) => format!("{} — {t}", Pane::Network.title()),
+        None => format!(
+            "{} ({}/{})",
+            Pane::Network.title(),
+            visible.len(),
+            app.exchanges.len()
+        ),
+    };
     let block = pane_block(app, Pane::Network, &title);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -85,11 +88,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ));
     match &app.domain {
         Some(d) => kinds.push(Span::styled(
-            elide(d, 24),
+            elide(d, 20),
             Style::default().fg(Color::Cyan).bold(),
         )),
         None => kinds.push(Span::styled(
             format!("all domains ({})", app.domains().len()),
+            Style::default().fg(Color::DarkGray),
+        )),
+    }
+    kinds.push(Span::styled(
+        "   [p] ",
+        Style::default().fg(Color::DarkGray),
+    ));
+    match &app.page {
+        Some(p) => kinds.push(Span::styled(
+            elide(p, 22),
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        None => kinds.push(Span::styled(
+            format!("all pages ({})", app.pages().len()),
             Style::default().fg(Color::DarkGray),
         )),
     }
@@ -265,12 +282,17 @@ pub fn domain_rows(app: &App) -> Vec<(String, Option<usize>, bool)> {
     rows
 }
 
+/// Rect the detail modal occupies — clicks inside it must not dismiss it.
+pub fn detail_rect(area: Rect) -> Rect {
+    centered(area, 86, 86)
+}
+
 /// The complete exchange. Nothing but headers and bodies, per spec.
 pub fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     let Some(e) = app.selected_exchange() else {
         return;
     };
-    let modal = centered(area, 86, 86);
+    let modal = detail_rect(area);
     f.render_widget(Clear, modal);
 
     let title = format!(" {} {} — {} ", e.method, e.path(), status_text(e));

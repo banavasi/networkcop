@@ -525,6 +525,29 @@ async fn connect(ws_url: &str, max_body: u64) -> Result<(Cdp, mpsc::Receiver<Cap
                             break;
                         }
                     }
+                    // SPA routing: history.pushState/replaceState never fires
+                    // frameNavigated, so without this the page filter would be
+                    // dead on every client-routed app.
+                    "Page.navigatedWithinDocument" => {
+                        let url = params["url"].as_str().unwrap_or_default().to_string();
+                        let frame_id = params["frameId"].as_str().unwrap_or_default().to_string();
+                        // only the main frame changes "the page"
+                        let is_main = main_frame.as_deref().map(|m| m == frame_id).unwrap_or(true);
+                        if url.is_empty() {
+                            continue;
+                        }
+                        if cap_tx
+                            .send(Capture::Navigated {
+                                url,
+                                frame_id,
+                                is_main,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     "Page.frameNavigated" => {
                         let Ok(e) = serde_json::from_value::<FrameNavigated>(params) else {
                             continue;
@@ -533,7 +556,6 @@ async fn connect(ws_url: &str, max_body: u64) -> Result<(Cdp, mpsc::Receiver<Cap
                         if is_main {
                             main_frame = Some(e.frame.id.clone());
                         }
-                        let _ = &main_frame;
                         if cap_tx
                             .send(Capture::Navigated {
                                 url: e.frame.url,

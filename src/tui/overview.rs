@@ -1,13 +1,14 @@
-//! Top-left: the session at a glance — navigation trail, request waterfall,
-//! and the rollup counters.
+//! Right-top: the session overview — traffic bucketed by page, kind, domain or
+//! status, so "what does /checkout actually call?" is one glance and one Enter.
 
-use super::{method_color, pane_block, status_style};
-use crate::app::{human_size, App, Pane};
+use super::{pane_block, status_style};
+use crate::app::{human_size, App, GroupBy, Pane};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let block = pane_block(app, Pane::Overview, Pane::Overview.title());
+    let title = format!("{} · by {}", Pane::Overview.title(), app.group_by.label());
+    let block = pane_block(app, Pane::Overview, &title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -16,140 +17,128 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // --- navigation trail ---
-    if app.navigations.is_empty() {
+    // --- grouping selector ---
+    let mut sel: Vec<Span> = Vec::new();
+    for (i, g) in GroupBy::ALL.iter().enumerate() {
+        if i > 0 {
+            sel.push(Span::styled(" ", Style::default()));
+        }
+        let on = app.group_by == *g;
+        sel.push(Span::styled(
+            g.label().to_string(),
+            if on {
+                Style::default().fg(Color::Magenta).bold().underlined()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+    }
+    sel.push(Span::styled("  [g]", Style::default().fg(Color::DarkGray)));
+    lines.push(Line::from(sel));
+
+    // --- current page, so you always know where you are ---
+    let here = app
+        .current_page
+        .as_deref()
+        .map(crate::db::path_of)
+        .unwrap_or_else(|| "—".into());
+    lines.push(Line::from(vec![
+        Span::styled("on ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            elide(&here, inner.width.saturating_sub(4) as usize),
+            Style::default().fg(Color::Cyan).bold(),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // --- the groups ---
+    let groups = app.groups();
+    let rows = inner.height.saturating_sub(lines.len() as u16 + 2) as usize;
+    let start = app.group_cursor.saturating_sub(rows.saturating_sub(1));
+    let w = inner.width as usize;
+
+    if groups.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "waiting for traffic…",
+            Style::default().fg(Color::DarkGray).italic(),
+        )));
+    }
+
+    for (i, g) in groups.iter().enumerate().skip(start).take(rows) {
+        let cursor = i == app.group_cursor && app.focus == Pane::Overview;
+        // "  12  3⚠  1.2 kB" — counts right-aligned, label takes the rest
+        let counts = format!("{:>4}", g.total);
+        let errs = if g.errors > 0 {
+            format!(" {:>3}✗", g.errors)
+        } else {
+            "     ".into()
+        };
+        let label_w = w.saturating_sub(counts.len() + errs.len() + 2);
         lines.push(Line::from(vec![
-            Span::styled("nav  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                app.target.clone(),
-                Style::default().fg(Color::DarkGray).italic(),
+                if cursor { "▍" } else { " " },
+                Style::default().fg(if cursor { Color::Cyan } else { Color::Reset }),
             ),
-        ]));
-    } else {
-        let trail: Vec<String> = app
-            .navigations
-            .iter()
-            .rev()
-            .take(4)
-            .rev()
-            .map(|n| short_path(&n.url))
-            .collect();
-        let mut spans = vec![Span::styled("nav  ", Style::default().fg(Color::DarkGray))];
-        for (i, p) in trail.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
-            }
-            let last = i == trail.len() - 1;
-            spans.push(Span::styled(
-                p.clone(),
-                if last {
-                    Style::default().fg(Color::Cyan).bold()
+            Span::styled(
+                format!("{:<label_w$}", elide(&g.label, label_w)),
+                if cursor {
+                    Style::default().fg(Color::White).bold()
+                } else if g.errors > 0 {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                counts,
+                if g.rest > 0 {
+                    Style::default().fg(Color::Cyan)
                 } else {
                     Style::default().fg(Color::Gray)
                 },
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
-    lines.push(Line::from(""));
-
-    // --- waterfall ---
-    // Bars are positioned by arrival order and scaled by duration; the point is
-    // to show which calls are slow and where they cluster, not wall-clock truth.
-    let rows = inner.height.saturating_sub(4) as usize;
-    let recent: Vec<_> = app.exchanges.iter().rev().take(rows).rev().collect();
-    let max_ms = recent.iter().map(|e| e.duration_ms).fold(1.0_f64, f64::max);
-    let track = inner.width.saturating_sub(20) as usize;
-
-    for e in &recent {
-        let frac = (e.duration_ms / max_ms).clamp(0.0, 1.0);
-        let filled = ((frac * track as f64).round() as usize).max(1).min(track);
-        let colour = if e.is_error() {
-            Color::Red
-        } else {
-            method_color(&e.method)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<6} ", short_method(&e.method)),
-                Style::default().fg(colour).bold(),
             ),
-            Span::styled("█".repeat(filled), Style::default().fg(colour)),
-            Span::styled(
-                "·".repeat(track.saturating_sub(filled)),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!(" {:>7}", fmt_ms(e.duration_ms)),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(errs, status_style(Some(500), g.errors > 0)),
         ]));
     }
 
     // --- rollup ---
     let (total, failed, console_errors) = app.counters();
     lines.push(Line::from(""));
-    let mut roll = vec![
-        Span::styled(format!("{total} req"), Style::default().fg(Color::Gray)),
+    lines.push(Line::from(vec![
+        Span::styled(format!("{total} req · "), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{failed} failed"),
+            Style::default().fg(if failed > 0 { Color::Red } else { Color::Gray }),
+        ),
         Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-    ];
-    roll.push(Span::styled(
-        format!("{failed} failed"),
-        status_style(if failed > 0 { Some(500) } else { Some(200) }, false),
-    ));
-    roll.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-    roll.push(Span::styled(
-        format!("{console_errors} console err"),
-        Style::default().fg(if console_errors > 0 {
-            Color::Red
-        } else {
-            Color::Gray
-        }),
-    ));
-    roll.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-    roll.push(Span::styled(
-        human_size(app.total_bytes()),
-        Style::default().fg(Color::Gray),
-    ));
-    lines.push(Line::from(roll));
+        Span::styled(
+            format!("{console_errors} err"),
+            Style::default().fg(if console_errors > 0 {
+                Color::Red
+            } else {
+                Color::Gray
+            }),
+        ),
+        Span::styled(
+            format!(" · {}", human_size(app.total_bytes())),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
 
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn short_method(m: &str) -> String {
-    let m = m.to_ascii_uppercase();
-    if m.len() > 6 {
-        m[..6].to_string()
-    } else {
-        m
+/// Trim from the left so the distinguishing tail of a long path stays visible.
+pub fn elide(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if w == 0 {
+        return String::new();
     }
-}
-
-pub fn fmt_ms(ms: f64) -> String {
-    if ms >= 1000.0 {
-        format!("{:.1}s", ms / 1000.0)
-    } else {
-        format!("{ms:.0}ms")
+    if n <= w {
+        return s.to_string();
     }
-}
-
-/// `http://host/a/b?c` → `/a/b`, and `/` for a bare origin.
-pub fn short_path(url: &str) -> String {
-    let after = match url.split_once("://") {
-        Some((_, r)) => r,
-        None => url,
-    };
-    match after.find('/') {
-        Some(i) => {
-            let p = after[i..].split('?').next().unwrap_or("/");
-            if p.is_empty() {
-                "/".into()
-            } else {
-                p.to_string()
-            }
-        }
-        None => "/".into(),
-    }
+    let keep: String = s.chars().skip(n - (w - 1)).collect();
+    format!("…{keep}")
 }
 
 #[cfg(test)]
@@ -157,20 +146,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durations_read_naturally() {
-        assert_eq!(fmt_ms(86.0), "86ms");
-        assert_eq!(fmt_ms(999.4), "999ms");
-        assert_eq!(fmt_ms(2100.0), "2.1s");
-    }
-
-    #[test]
-    fn paths_shorten_to_something_readable() {
-        assert_eq!(
-            short_path("http://localhost:8080/checkout?step=2"),
-            "/checkout"
-        );
-        assert_eq!(short_path("http://localhost:8080"), "/");
-        assert_eq!(short_path("http://localhost:8080/"), "/");
-        assert_eq!(short_path("about:blank"), "/");
+    fn long_labels_keep_their_tail() {
+        let s = elide("/api/v1/organisations/42/members", 12);
+        assert_eq!(s.chars().count(), 12);
+        assert!(s.ends_with("members"));
+        assert_eq!(elide("/short", 20), "/short");
+        assert_eq!(elide("/x", 0), "");
     }
 }

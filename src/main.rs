@@ -238,6 +238,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     let mut events = EventStream::new();
     let mut layout = tui::Layout4::default();
+    let mut frame_area = Rect::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
     // An external SIGINT/SIGTERM must still reach the flush path — "graceful
     // shutdown always flushes" has to hold for `kill`, not just for `q`.
@@ -245,7 +246,10 @@ async fn run(cli: Cli) -> Result<()> {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     let res: Result<()> = loop {
-        term.draw(|f| layout = tui::draw(f, &app))?;
+        term.draw(|f| {
+            frame_area = f.area();
+            layout = tui::draw(f, &app);
+        })?;
         if app.should_quit {
             break Ok(());
         }
@@ -259,7 +263,7 @@ async fn run(cli: Cli) -> Result<()> {
                         on_key(&mut app, k, &writes_tx, &agent_tx, &backend,
                                &db_path, session_id, &target, &cli.out_dir).await;
                     }
-                    Ok(Event::Mouse(m)) => on_mouse(&mut app, m, &layout),
+                    Ok(Event::Mouse(m)) => on_mouse(&mut app, m, &layout, &frame_area),
                     Ok(Event::Resize(_, _)) => {}
                     Err(e) => break Err(e.into()),
                     _ => {}
@@ -360,7 +364,9 @@ async fn run(cli: Cli) -> Result<()> {
 async fn ingest(app: &mut App, cap: Capture, writes: &mpsc::Sender<DbWrite>) {
     match cap {
         Capture::Request(r) => {
+            let page = app.current_page.clone();
             app.exchanges.push(db::Exchange {
+                page_url: page.clone(),
                 request_id: r.request_id.clone(),
                 ts: Utc::now().to_rfc3339(),
                 method: r.method.clone(),
@@ -379,6 +385,7 @@ async fn ingest(app: &mut App, cap: Capture, writes: &mpsc::Sender<DbWrite>) {
                     resource_type: r.resource_type,
                     headers: r.headers,
                     body: r.post_data,
+                    page_url: page,
                 })
                 .await;
         }
@@ -461,12 +468,23 @@ async fn ingest(app: &mut App, cap: Capture, writes: &mpsc::Sender<DbWrite>) {
             let _ = writes.send(DbWrite::Console(line)).await;
         }
         Capture::Navigated { url, is_main, .. } => {
-            if is_main {
-                app.navigations.push(db::Navigation {
-                    ts: Utc::now().to_rfc3339(),
-                    url: url.clone(),
-                });
+            // about:blank / chrome-error:// are Chrome's own scaffolding, never a
+            // page the user navigated to; they would otherwise litter the trail.
+            let real_page = url.starts_with("http://") || url.starts_with("https://");
+            if !is_main || !real_page {
+                return;
             }
+            // SPA routers fire repeatedly for the same URL; only record moves.
+            // Memory and disk must agree, so both are gated on the same condition.
+            let changed = app.current_page.as_deref() != Some(url.as_str());
+            app.current_page = Some(url.clone());
+            if !changed {
+                return;
+            }
+            app.navigations.push(db::Navigation {
+                ts: Utc::now().to_rfc3339(),
+                url: url.clone(),
+            });
             let _ = writes
                 .send(DbWrite::Navigation {
                     ts: Utc::now(),
@@ -498,6 +516,9 @@ async fn on_key(
     out_dir: &std::path::Path,
 ) {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    // A toast survives exactly until the next key: readable, never sticky. Cleared
+    // here rather than on a timer so it cannot vanish mid-read.
+    app.toast = None;
 
     // ctrl-c always quits, whatever has focus
     if ctrl && matches!(k.code, KeyCode::Char('c')) {
@@ -532,7 +553,7 @@ async fn on_key(
     // modal owns the keyboard while open
     if app.detail_open {
         match k.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('q') => {
                 app.detail_open = false;
                 app.detail_scroll = 0;
             }
@@ -542,6 +563,12 @@ async fn on_key(
             }
             KeyCode::PageDown => app.detail_scroll += 20,
             KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(20),
+            // copy actions — the whole point of opening a row
+            KeyCode::Char('c') => copy_from_modal(app, CopyWhat::All),
+            KeyCode::Char('r') => copy_from_modal(app, CopyWhat::Request),
+            KeyCode::Char('s') => copy_from_modal(app, CopyWhat::Response),
+            KeyCode::Char('u') => copy_from_modal(app, CopyWhat::Curl),
+            KeyCode::Char('e') => copy_from_modal(app, CopyWhat::ErrorReport),
             _ => {}
         }
         return;
@@ -615,11 +642,18 @@ async fn on_key(
         KeyCode::Down | KeyCode::Char('j') => match app.focus {
             Pane::Network => app.select_next(),
             Pane::Console => app.console_scroll += 1,
+            Pane::Overview => {
+                let n = app.groups().len();
+                if n > 0 {
+                    app.group_cursor = (app.group_cursor + 1).min(n - 1);
+                }
+            }
             _ => {}
         },
         KeyCode::Up | KeyCode::Char('k') => match app.focus {
             Pane::Network => app.select_prev(),
             Pane::Console => app.console_scroll = app.console_scroll.saturating_sub(1),
+            Pane::Overview => app.group_cursor = app.group_cursor.saturating_sub(1),
             _ => {}
         },
         KeyCode::Enter if app.focus == Pane::Network => {
@@ -636,6 +670,33 @@ async fn on_key(
         // kind filter: t cycles forward, T back
         KeyCode::Char('t') if app.focus == Pane::Network => app.cycle_kind(true),
         KeyCode::Char('T') if app.focus == Pane::Network => app.cycle_kind(false),
+        // page filter: cycle through the pages visited
+        KeyCode::Char('p') if app.focus == Pane::Network => {
+            let pages = app.pages();
+            let next = match &app.page {
+                None => pages.first().cloned(),
+                Some(cur) => match pages.iter().position(|p| p == cur) {
+                    Some(i) if i + 1 < pages.len() => Some(pages[i + 1].clone()),
+                    _ => None,
+                },
+            };
+            app.set_page(next);
+        }
+        // grouping for the session overview
+        KeyCode::Char('g') => app.cycle_group(),
+        // copy the selected request, or the console, depending on focus
+        KeyCode::Char('c') if app.focus == Pane::Network => copy_from_modal(app, CopyWhat::All),
+        KeyCode::Char('e') if app.focus == Pane::Network => {
+            copy_from_modal(app, CopyWhat::ErrorReport)
+        }
+        KeyCode::Char('c') if app.focus == Pane::Console => {
+            let text = networkcop::copy::console_errors(&app.console);
+            report_copy(app, &text);
+        }
+        KeyCode::Enter if app.focus == Pane::Overview => {
+            app.apply_group_selection();
+            app.focus = Pane::Network;
+        }
         // domain picker
         KeyCode::Char('d') if app.focus == Pane::Network => {
             app.domain_picker = true;
@@ -647,11 +708,24 @@ async fn on_key(
     }
 }
 
-fn on_mouse(app: &mut App, m: MouseEvent, layout: &tui::Layout4) {
+fn on_mouse(app: &mut App, m: MouseEvent, layout: &tui::Layout4, full: &Rect) {
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // A click inside the modal must not dismiss it — otherwise the very
+            // click that opens a row appears to close it again.
             if app.detail_open {
-                app.detail_open = false;
+                let modal = networkcop::tui::network::detail_rect(*full);
+                let inside = m.column >= modal.x
+                    && m.column < modal.x + modal.width
+                    && m.row >= modal.y
+                    && m.row < modal.y + modal.height;
+                if !inside {
+                    app.detail_open = false;
+                    app.detail_scroll = 0;
+                }
+                return;
+            }
+            if app.domain_picker {
                 return;
             }
             let Some(pane) = tui::pane_at(layout, m.column, m.row) else {
@@ -839,6 +913,41 @@ async fn ask_once(
     let reply = agent::handle(intent, &session, backend, &mut db, out_dir).await?;
     println!("{}", reply.text);
     Ok(())
+}
+
+/// Which payload a copy key produces.
+enum CopyWhat {
+    All,
+    Request,
+    Response,
+    Curl,
+    ErrorReport,
+}
+
+/// Build the payload for the selected row and put it on the clipboard.
+fn copy_from_modal(app: &mut App, what: CopyWhat) {
+    use networkcop::copy;
+    let Some(e) = app.selected_exchange().cloned() else {
+        app.toast = Some("nothing selected".into());
+        return;
+    };
+    let text = match what {
+        CopyWhat::All => copy::exchange(&e),
+        CopyWhat::Request => copy::request(&e),
+        CopyWhat::Response => copy::response(&e),
+        CopyWhat::Curl => copy::as_curl(&e),
+        CopyWhat::ErrorReport => copy::error_report(&e, &app.console, &app.target),
+    };
+    report_copy(app, &text);
+}
+
+/// Copy and say what happened — silence after a copy key is indistinguishable
+/// from a broken clipboard.
+fn report_copy(app: &mut App, text: &str) {
+    app.toast = Some(match networkcop::clipboard::copy(text) {
+        Ok(via) => networkcop::clipboard::describe(text.len(), via),
+        Err(e) => format!("copy failed: {e}"),
+    });
 }
 
 /// `networkcop update` — report whether a newer release exists.
