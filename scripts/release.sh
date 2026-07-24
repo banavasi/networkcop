@@ -46,7 +46,9 @@ if [[ -z "$DRY" ]]; then
   cargo clippy --all-targets -- -D warnings
   cargo test --all-targets
   RUSTFLAGS="-D warnings" cargo build --release
-  cargo publish --dry-run
+  # the bump above is intentionally uncommitted at this point — it gets committed
+  # below, once the gates have passed
+  cargo publish --dry-run --allow-dirty
 else
   printf '  \033[90m[dry-run] fmt · clippy · test · build · publish --dry-run\033[0m\n'
 fi
