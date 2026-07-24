@@ -1,6 +1,6 @@
 [package]
 name = "networkcop"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Terminal agent harness for front-end debugging: drives Chrome over CDP, records every request, response and console message to SQLite, and answers questions strictly from the captured session."
