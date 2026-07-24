@@ -112,6 +112,11 @@ pub type Headers = BTreeMap<String, String>;
 /// `CREATE TABLE IF NOT EXISTS` will not add a column to a table that already
 /// exists, so a session recorded before page tracking would fail every query
 /// mentioning `page_url`. Adding it is safe and idempotent.
+///
+/// MUST run before [`SCHEMA`], which creates an index over `page_url`: on an old
+/// database that index refers to a column this function has not added yet, and the
+/// whole batch fails. On a fresh database `PRAGMA table_info` returns nothing and
+/// this is a no-op, so the ordering is safe both ways.
 fn migrate(conn: &Connection) -> Result<()> {
     for table in ["requests", "console"] {
         let mut have: Vec<String> = Vec::new();
@@ -408,8 +413,10 @@ impl Db {
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        conn.execute_batch(SCHEMA).context("apply schema")?;
+        // Migrate BEFORE the schema batch: SCHEMA creates an index over page_url,
+        // and on a database from an older version that column does not exist yet.
         migrate(&conn)?;
+        conn.execute_batch(SCHEMA).context("apply schema")?;
         conn.execute(
             "INSERT INTO sessions (started_at, target) VALUES (?1, ?2)",
             params![Utc::now().to_rfc3339(), target],
@@ -421,8 +428,8 @@ impl Db {
     /// Open read-only-ish against an existing session (for `sessions`/`ask` subcommands).
     pub fn attach(path: &Path, session_id: Option<i64>) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
-        conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
+        conn.execute_batch(SCHEMA)?;
         let session_id = match session_id {
             Some(id) => id,
             None => conn
@@ -637,7 +644,8 @@ impl Db {
                 text: r.get(2)?,
                 url: r.get(3)?,
                 line: r.get(4)?,
-                source: r.get(5)?,
+                // nullable in older schemas — a NULL here must not blow up a read
+                source: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 page_url: r.get(6)?,
             })
         })?;
@@ -783,6 +791,97 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].console_errors, 1);
         assert!(sessions[0].ended_at.is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The schema as networkcop 0.1.0–0.2.1 wrote it: no `page_url` anywhere.
+    /// Kept verbatim rather than derived, so it cannot drift with the live SCHEMA.
+    const SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+    ended_at TEXT, target TEXT NOT NULL, label TEXT);
+CREATE TABLE IF NOT EXISTS requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL, ts TEXT NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL,
+    resource_type TEXT, req_headers TEXT NOT NULL DEFAULT '{}', req_body TEXT,
+    status INTEGER, status_text TEXT, res_headers TEXT, res_body BLOB,
+    res_body_b64 INTEGER NOT NULL DEFAULT 0, truncated_from INTEGER, mime_type TEXT,
+    size INTEGER NOT NULL DEFAULT 0, duration_ms REAL NOT NULL DEFAULT 0,
+    from_cache INTEGER NOT NULL DEFAULT 0, remote_ip TEXT, error TEXT,
+    UNIQUE(session_id, request_id));
+CREATE TABLE IF NOT EXISTS console (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL, severity TEXT NOT NULL, text TEXT NOT NULL,
+    url TEXT, line INTEGER, source TEXT);
+CREATE TABLE IF NOT EXISTS navigations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL, url TEXT NOT NULL, is_main INTEGER NOT NULL DEFAULT 1);
+"#;
+
+    /// Regression: 0.3.0 shipped a schema whose page_url INDEX was applied before
+    /// the migration that adds the column, so every command died on any database
+    /// written by an earlier version. Fresh-database tests could not catch it.
+    #[test]
+    fn opens_a_database_written_by_an_older_version() {
+        let path = tmp();
+        // lay down the old schema with a real row in it
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (started_at, target) VALUES ('2026-07-01T00:00:00Z','http://localhost:8080')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO requests (session_id, request_id, ts, method, url)
+                 VALUES (1,'R1','2026-07-01T00:00:00Z','GET','http://localhost:8080/api/me')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO console (session_id, ts, severity, text)
+                 VALUES (1,'2026-07-01T00:00:00Z','error','older session')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // both entry points must survive it
+        let db = Db::attach(&path, None).expect("attach must migrate, not fail");
+        let ex = db.exchanges(db.session_id).unwrap();
+        assert_eq!(ex.len(), 1, "old rows must survive the migration");
+        assert_eq!(ex[0].url, "http://localhost:8080/api/me");
+        assert_eq!(ex[0].page_url, None, "old rows have no page");
+        assert_eq!(db.console(db.session_id).unwrap().len(), 1);
+        assert_eq!(db.sessions().unwrap().len(), 1);
+        drop(db);
+
+        // and opening a NEW session against the same file must work too
+        let db2 = Db::open(&path, "http://localhost:3000").expect("open must migrate");
+        assert_eq!(db2.sessions().unwrap().len(), 2);
+
+        // idempotent: re-opening changes nothing
+        drop(db2);
+        let db3 = Db::attach(&path, None).unwrap();
+        assert_eq!(db3.sessions().unwrap().len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn migration_is_a_no_op_on_a_fresh_database() {
+        let path = tmp();
+        let db = Db::open(&path, "t").unwrap();
+        // page_url present from the start, no migration needed
+        let cols: Vec<String> = {
+            let mut stmt = db.conn.prepare("PRAGMA table_info(requests)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.map(|c| c.unwrap()).collect()
+        };
+        assert!(cols.iter().any(|c| c == "page_url"));
         let _ = std::fs::remove_file(&path);
     }
 
