@@ -1,0 +1,37 @@
+[package]
+name = "networkcop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Terminal agent harness for front-end debugging: drives Chrome over CDP, records every request, response and console message to SQLite, and answers questions strictly from the captured session."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/banavasi/networkcop"
+homepage = "https://github.com/banavasi/networkcop"
+readme = "README.md"
+keywords = ["cdp", "devtools", "tui", "debugging", "chrome"]
+categories = ["command-line-utilities", "development-tools::debugging", "web-programming"]
+exclude = ["/.agents", "/.claude", "/docs/design", "/scripts"]
+
+# single-package repo; keep cargo from walking up into the workspace parent
+[workspace]
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.4", features = ["derive", "env"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+dirs = "6.0.0"
+futures-util = "0.3.33"
+ratatui = "0.30.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "charset", "http2"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "chrono"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml_ng = "0.10.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "signal"] }
+tokio-tungstenite = "0.30.0"
+uuid = { version = "1.24.0", features = ["v4"] }
