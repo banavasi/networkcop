@@ -40,11 +40,23 @@ pub async fn latest() -> Result<String> {
 /// `Some(newer)` when an upgrade exists. `None` for up-to-date, or for any
 /// failure — an update check must never be the reason a debugging session stops.
 pub async fn check() -> Option<String> {
-    if std::env::var_os("NETWORKCOP_NO_UPDATE_CHECK").is_some() {
+    if opted_out() {
         return None;
     }
     let latest = latest().await.ok()?;
     is_newer(&latest, CURRENT).then_some(latest)
+}
+
+/// Any value except empty / `0` / `false` disables the check. Accepting `=1` is
+/// the whole point — that is what people (and CI) actually write.
+pub fn opted_out() -> bool {
+    match std::env::var("NETWORKCOP_NO_UPDATE_CHECK") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no")
+        }
+        Err(_) => false,
+    }
 }
 
 /// What to tell the user when a newer version exists.
@@ -130,6 +142,31 @@ mod tests {
         assert!(a.contains("9.9.9"));
         assert!(a.contains(CURRENT));
         assert!(a.contains("cargo install networkcop --force"));
+    }
+
+    /// `=1` must work. Clap's `env` on a bool rejects it, which is why the var is
+    /// read here instead — a regression would silently break CI and the README.
+    #[test]
+    fn opt_out_accepts_the_values_people_actually_write() {
+        let key = "NETWORKCOP_NO_UPDATE_CHECK";
+        // SAFETY: single-threaded test, restored before returning
+        for (val, want) in [
+            ("1", true),
+            ("true", true),
+            ("TRUE", true),
+            ("yes", true),
+            ("anything", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("", false),
+            ("  ", false),
+        ] {
+            unsafe { std::env::set_var(key, val) };
+            assert_eq!(opted_out(), want, "NETWORKCOP_NO_UPDATE_CHECK={val:?}");
+        }
+        unsafe { std::env::remove_var(key) };
+        assert!(!opted_out(), "unset means check normally");
     }
 
     #[test]

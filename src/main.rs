@@ -82,7 +82,12 @@ struct Cli {
     dump_layout: bool,
 
     /// Skip the crates.io update check on startup.
-    #[arg(long, env = "NETWORKCOP_NO_UPDATE_CHECK")]
+    ///
+    /// The `NETWORKCOP_NO_UPDATE_CHECK` env var does the same thing and is read
+    /// in `update::check` — deliberately NOT via clap's `env`, which requires a
+    /// bool flag's variable to be exactly "true"/"false" and rejects the `=1`
+    /// everyone actually writes.
+    #[arg(long)]
     no_update_check: bool,
 
     #[command(subcommand)]
